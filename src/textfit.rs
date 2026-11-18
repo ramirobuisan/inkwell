@@ -221,7 +221,7 @@ impl Shaper<'_> {
     }
 }
 
-fn is_cjk(c: char) -> bool {
+pub fn is_cjk(c: char) -> bool {
     matches!(c as u32,
         0x3000..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF |
         0xFF00..=0xFFEF | 0xAC00..=0xD7AF | 0x1100..=0x11FF)
@@ -366,7 +366,7 @@ fn is_arabic(c: char) -> bool {
 }
 
 /// Arabic letters in their joined (presentation) forms, since glyphs are drawn one by one.
-fn shape_arabic(text: &str) -> String {
+pub fn shape_arabic(text: &str) -> String {
     if !text.chars().any(is_arabic) {
         return text.to_owned();
     }
@@ -376,7 +376,7 @@ fn shape_arabic(text: &str) -> String {
 /// A line in the order its characters show: right-to-left runs reversed by the Unicode
 /// bidirectional algorithm, as the original orders runs by their bidi levels
 /// (koharu-renderer text/arrange.rs).
-fn visual_order(line: &str) -> String {
+pub fn visual_order(line: &str) -> String {
     if !line.chars().any(|c| matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)) {
         return line.to_owned();
     }

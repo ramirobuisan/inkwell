@@ -85,7 +85,7 @@ pub fn missing_language_help(lang: &str, no_tesseract: bool) -> String {
         String::new()
     };
     format!(
-        "Reading {name} text needs Tesseract's {name} language pack, which isn't installed, so finding and reading text was skipped.\nInstall it in a terminal with:\n    {install} tesseract-data-{lang}{vert}\nthen press Run again. (Or pick another language in the Translate tab.)"
+        "Reading {name} text needs Tesseract's {name} language pack, which isn't installed, so finding and reading text was skipped.\nInstall it in a terminal with:\n    {install} tesseract-data-{lang}{vert}\nthen press Run again. (Or pick another language in the Setup tab.)"
     )
 }
 
@@ -138,7 +138,7 @@ pub fn has_model(models: &[String], model: &str) -> bool {
 
 pub fn missing_model_help(model: &str) -> String {
     format!(
-        "The model '{model}' isn't on the translation server yet, so translating was skipped.\nIn the Translate tab, press \u{201c}Download {model}\u{201d}, or pick one of the server's models.\n(In a terminal: ollama pull {model})"
+        "The model '{model}' isn't on the translation server yet, so translating was skipped.\nIn the Setup tab, press \u{201c}Download {model}\u{201d}, or pick one of the server's models.\n(In a terminal: ollama pull {model})"
     )
 }
 
@@ -240,7 +240,7 @@ pub fn server_answers(s: &Settings) -> Result<(), String> {
             Ok(())
         }
         Err(_) => Err(format!(
-            "No translation server answered at {}, so translating was skipped.\nTo translate on this laptop, install Ollama, start it and get the model:\n    ollama serve\n    ollama pull {}\nOr put an online service's address, model and API key in the Translate tab.",
+            "No translation server answered at {}, so translating was skipped.\nTo translate on this laptop, install Ollama, start it and get the model:\n    ollama serve\n    ollama pull {}\nOr put an online service's address, model and API key in the Setup tab.",
             s.endpoint, s.model
         )),
     }
@@ -384,7 +384,7 @@ pub fn edge_color(page: &RgbaImage, b: &Block) -> [u8; 4] {
     m
 }
 
-fn chat_url(endpoint: &str) -> String {
+pub fn chat_url(endpoint: &str) -> String {
     let e = endpoint.trim().trim_end_matches('/');
     if e.ends_with("/chat/completions") {
         e.to_owned()

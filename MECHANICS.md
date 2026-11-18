@@ -125,3 +125,16 @@ The original runs detection, OCR, inpainting and LLM models on the GPU. Here:
   `http://localhost:11434/v1`), model and key set in Settings.
 - **Clean up** (inpainting): fills the box with the bubble's own colour, sampled as the
   median colour along the box edge (*estimated replacement*).
+
+## Features added after comparing with the original
+
+| Feature | Original | Rebuild |
+|---|---|---|
+| Story | `StoryPanel.tsx`: every page's texts in page order, each page's in reading order, numbered on the canvas while it shows; editing a field edits the box; focusing it shows its page and selects the box | Story tab, same behaviour; "Renumber right-to-left" sorts one page in manga order (*estimated* rule: rows of 0.6 × the tallest box, right to left) |
+| History | `HistoryWindow.tsx`, `commands/scene.rs` `go_to(step)`: a Photoshop-style list, 0 = as opened | History window (View → History…); steps labelled from what changed; a click goes to that step |
+| Brush / eraser / picker | `set_brush`, `ColorSampling.tsx`, the "Cleanup" layer | A cleanup layer per page (`paint/NNNN.png`), round brush with a half-pixel soft edge, eraser, picker sampling the cleanup then the artwork; each stroke is one undo step |
+| RAR / CBR / PDF import | `import.rs`: `rars`, `hayro`, PDF at 300 DPI (`PDF_SCALE`) | the same libraries (rars 0.12, hayro 0.8), PDF at 300/72 scale |
+| Direction | `values.rs:199` `Direction { Horizontal, Vertical }`, Auto in the type bar | Auto / Across / Down; Auto = down when most letters are CJK and the box is 1.2× taller than wide (*estimated*); upright punctuation forms; closing marks never start a column |
+| Right-to-left | `text/arrange.rs`: runs ordered by Unicode bidi levels | `unicode-bidi` reordering per line; Arabic letters joined with `ar-reshaper` (the original uses a full text shaper) |
+| PSD | `koharu-psd`: layered PSD, at most 30,000 px a side, editable type layers | layered PSD (artwork, Cleanup, each box's cover and text as named layers, hidden boxes hidden), same size limit; texts are pixel layers, not editable type |
+| Assistant | `koharu-agent`: get_project, get_page, get_layer, edit (one undo step), run, wait, stop, view_page; turns capped | Ask tab: get_project, get_page, show_page, edit (one undo step, applied whole or not at all); 8 model calls per message (*estimated* cap); no run/wait/stop/view_page |

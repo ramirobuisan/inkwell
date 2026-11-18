@@ -105,6 +105,7 @@ enum Tool {
 enum Tab {
     Properties,
     Story,
+    Assistant,
     Translate,
 }
 
@@ -385,6 +386,11 @@ pub struct App {
     folder_picker: Option<Receiver<PathBuf>>,
     open_after_import: bool,
     applied_dark: Option<bool>,
+    agent: Option<crate::agent::Agent>,
+    agent_history: Vec<serde_json::Value>,
+    agent_input: String,
+    agent_status: String,
+    agent_error: Option<String>,
     brush_size: f32,
     brush_color: [u8; 4],
     server_models: Option<Result<Vec<String>, String>>,
@@ -400,6 +406,17 @@ fn setup_style(ctx: &egui::Context, fonts: &FontStore) {
                 .insert("cjk".into(), Arc::new(egui::FontData::from_owned(bytes)));
             for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
                 defs.families.entry(fam).or_default().push("cjk".into());
+            }
+        }
+    }
+    // Arabic and Hebrew for the window's own text (names and labels).
+    for stem in ["NotoSansArabic-Regular", "NotoSansHebrew-Regular"] {
+        if let Some((_, path)) = fonts.list.iter().find(|(n, _)| n == stem) {
+            if let Ok(bytes) = std::fs::read(path) {
+                defs.font_data.insert(stem.into(), Arc::new(egui::FontData::from_owned(bytes)));
+                for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                    defs.families.entry(fam).or_default().push(stem.into());
+                }
             }
         }
     }
@@ -508,6 +525,23 @@ fn describe_step(before: &[Block], after: &[Block]) -> String {
         1 => kinds[0].into(),
         _ => format!("{} and more", kinds[0]),
     }
+}
+
+/// A label cut to about `units` narrow characters (wide CJK characters count as two),
+/// with right-to-left text joined and in reading order.
+fn display_label(text: &str, units: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = if textfit::is_cjk(c) { 2 } else { 1 };
+        if used + w > units {
+            out.push('…');
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    textfit::visual_order(&textfit::shape_arabic(&out))
 }
 
 fn ago(t: Option<SystemTime>) -> String {
@@ -621,6 +655,11 @@ impl App {
             folder_picker: None,
             open_after_import: false,
             applied_dark: None,
+            agent: None,
+            agent_history: Vec::new(),
+            agent_input: String::new(),
+            agent_status: String::new(),
+            agent_error: None,
             brush_size: 24.0,
             brush_color: [255, 255, 255, 255],
             server_models: None,
@@ -1005,6 +1044,35 @@ impl App {
             if let Ok(list) = rx.try_recv() {
                 self.models_rx = None;
                 self.server_models = Some(list);
+            }
+        }
+
+        // The assistant's messages and tool calls.
+        let mut calls = Vec::new();
+        let mut agent_over = false;
+        if let Some(a) = &self.agent {
+            while let Ok(m) = a.rx.try_recv() {
+                match m {
+                    crate::agent::ToMain::Call { name, args, reply } => calls.push((name, args, reply)),
+                    crate::agent::ToMain::Keep(v) => self.agent_history.push(v),
+                    crate::agent::ToMain::Status(s) => self.agent_status = s,
+                    crate::agent::ToMain::Done => agent_over = true,
+                    crate::agent::ToMain::Failed(e) => {
+                        self.agent_error = Some(e);
+                        agent_over = true;
+                    }
+                }
+            }
+        }
+        for (name, args, reply) in calls {
+            let answer = self.agent_tool(&name, &args);
+            let _ = reply.send(answer);
+        }
+        if agent_over {
+            self.agent = None;
+            self.agent_status.clear();
+            if let Some(o) = &mut self.open {
+                o.save();
             }
         }
 
@@ -1601,7 +1669,7 @@ impl App {
 
     fn right_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("props")
-            .exact_width(290.0).show_separator_line(false)
+            .exact_width(320.0).show_separator_line(false)
             .resizable(false)
             .frame(
                 egui::Frame::new()
@@ -1611,11 +1679,13 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let w = (ui.available_width() - 16.0) / 3.0;
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let w = (ui.available_width() - 12.0) / 4.0;
                     for (tab, label) in [
                         (Tab::Properties, "☰ Type"),
                         (Tab::Story, "📖 Story"),
-                        (Tab::Translate, "🌐 Translate"),
+                        (Tab::Assistant, "💬 Ask"),
+                        (Tab::Translate, "🌐 Setup"),
                     ] {
                         let on = self.tab == tab;
                         let b = egui::Button::new(RichText::new(label).size(14.5))
@@ -1638,6 +1708,7 @@ impl App {
                     .show(ui, |ui| match self.tab {
                         Tab::Properties => self.properties(ui, ctx),
                         Tab::Story => self.story_tab(ui),
+                        Tab::Assistant => self.assistant_tab(ui, ctx),
                         Tab::Translate => self.translate_tab(ui),
                     });
             });
@@ -1888,10 +1959,7 @@ impl App {
                         FontId::proportional(18.0),
                         muted(),
                     );
-                    let mut label = b.label();
-                    if label.chars().count() > 26 {
-                        label = label.chars().take(25).collect::<String>() + "…";
-                    }
+                    let label = display_label(&b.label(), 26);
                     painter.text(
                         pos2(rect.left() + 36.0, rect.top() + 6.0),
                         Align2::LEFT_TOP,
@@ -2088,6 +2156,222 @@ impl App {
             if let Some(o) = &mut self.open {
                 o.selected = Some(id);
             }
+        }
+    }
+
+    /// The comic in one line, for the assistant's instructions.
+    fn outline(&self) -> String {
+        match &self.open {
+            Some(o) => format!(
+                "\"{}\", {} pages, page {} is shown, target language {}.",
+                o.data.name,
+                o.data.pages.len(),
+                o.data.current + 1,
+                self.settings.target_lang
+            ),
+            None => "no comic is open.".into(),
+        }
+    }
+
+    /// Answers one of the assistant's tool calls on the open comic. Errors go back word
+    /// for word, as the original's tools do, so the model can correct itself.
+    fn agent_tool(&mut self, name: &str, args: &serde_json::Value) -> String {
+        use serde_json::json;
+        let page_arg = args["page"].as_u64().map(|p| p as usize);
+        let Some(o) = &mut self.open else {
+            return json!({"error": "no comic is open"}).to_string();
+        };
+        let page_index = |p: Option<usize>, len: usize| -> Result<usize, String> {
+            match p {
+                Some(p) if p >= 1 && p <= len => Ok(p - 1),
+                Some(p) => Err(format!("there is no page {p}; pages run from 1 to {len}")),
+                None => Err("say which page".into()),
+            }
+        };
+        match name {
+            "get_project" => json!({
+                "name": o.data.name,
+                "page_shown": o.data.current + 1,
+                "pages": o.data.pages.iter().enumerate().map(|(i, p)| json!({
+                    "page": i + 1,
+                    "name": p.name,
+                    "width": p.width,
+                    "height": p.height,
+                    "boxes": p.blocks.len(),
+                    "translated": p.blocks.iter().filter(|b| !b.translation.trim().is_empty()).count(),
+                })).collect::<Vec<_>>(),
+            })
+            .to_string(),
+            "get_page" => match page_index(page_arg, o.data.pages.len()) {
+                Ok(i) => {
+                    let p = &o.data.pages[i];
+                    json!({
+                        "page": i + 1,
+                        "width": p.width,
+                        "height": p.height,
+                        "boxes": p.blocks.iter().map(|b| json!({
+                            "id": b.id, "x": b.x, "y": b.y, "w": b.w, "h": b.h,
+                            "original": b.source, "translation": b.translation, "visible": b.visible,
+                        })).collect::<Vec<_>>(),
+                    })
+                    .to_string()
+                }
+                Err(e) => json!({"error": e}).to_string(),
+            },
+            "show_page" => match page_index(page_arg, o.data.pages.len()) {
+                Ok(i) => {
+                    self.go_to(i);
+                    json!({"shown": i + 1}).to_string()
+                }
+                Err(e) => json!({"error": e}).to_string(),
+            },
+            "edit" => {
+                let i = match page_index(page_arg, o.data.pages.len()) {
+                    Ok(i) => i,
+                    Err(e) => return json!({"error": e}).to_string(),
+                };
+                // Check everything first: the edit applies whole or not at all.
+                let changes = args["changes"].as_array().cloned().unwrap_or_default();
+                for c in &changes {
+                    let id = c["id"].as_u64().unwrap_or(0);
+                    if !o.data.pages[i].blocks.iter().any(|b| b.id == id) {
+                        return json!({"error": format!("page {} has no box {id}", i + 1)}).to_string();
+                    }
+                }
+                let adds = args["add"].as_array().cloned().unwrap_or_default();
+                if changes.is_empty() && adds.is_empty() {
+                    return json!({"error": "nothing to change: give changes or add"}).to_string();
+                }
+                o.snapshot_page(i, None);
+                let (mut changed, mut deleted, mut added) = (0, 0, Vec::new());
+                for c in &changes {
+                    let id = c["id"].as_u64().unwrap_or(0);
+                    if c["delete"].as_bool() == Some(true) {
+                        o.data.pages[i].blocks.retain(|b| b.id != id);
+                        deleted += 1;
+                        continue;
+                    }
+                    if let Some(b) = o.data.pages[i].blocks.iter_mut().find(|b| b.id == id) {
+                        if let Some(t) = c["translation"].as_str() {
+                            b.translation = t.to_owned();
+                        }
+                        if let Some(t) = c["original"].as_str() {
+                            b.source = t.to_owned();
+                        }
+                        if let Some(v) = c["visible"].as_bool() {
+                            b.visible = v;
+                        }
+                        changed += 1;
+                    }
+                }
+                for a in &adds {
+                    let id = o.data.next_id;
+                    o.data.next_id += 1;
+                    let n = |k: &str, d: f64| a[k].as_f64().unwrap_or(d) as f32;
+                    o.data.pages[i].blocks.push(Block {
+                        id,
+                        x: n("x", 0.0),
+                        y: n("y", 0.0),
+                        w: n("w", 120.0).max(12.0),
+                        h: n("h", 60.0).max(12.0),
+                        translation: a["translation"].as_str().unwrap_or("").to_owned(),
+                        source: a["original"].as_str().unwrap_or("").to_owned(),
+                        cover: false,
+                        ..Block::default()
+                    });
+                    added.push(id);
+                }
+                o.changed();
+                json!({"page": i + 1, "changed": changed, "deleted": deleted, "added": added}).to_string()
+            }
+            other => json!({"error": format!("there is no tool called {other}")}).to_string(),
+        }
+    }
+
+    /// A chat with the assistant, which reads and edits the open comic through its tools.
+    fn assistant_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        section(ui, "💬", "Assistant", None);
+        ui.label(
+            RichText::new(format!(
+                "Ask about the comic or have it fix translations. It uses {} on your translation server; every change it makes can be undone.",
+                self.settings.model
+            ))
+            .color(muted())
+            .size(12.5),
+        );
+        ui.add_space(4.0);
+        for m in &self.agent_history {
+            let role = m["role"].as_str().unwrap_or("");
+            match role {
+                "user" => {
+                    egui::Frame::new()
+                        .fill(rose_soft())
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(m["content"].as_str().unwrap_or(""));
+                        });
+                }
+                "assistant" => {
+                    let text = m["content"].as_str().unwrap_or("");
+                    if !text.trim().is_empty() {
+                        ui.label(text);
+                    }
+                    if let Some(calls) = m["tool_calls"].as_array() {
+                        for c in calls {
+                            let name = c["function"]["name"].as_str().unwrap_or("");
+                            ui.label(RichText::new(format!("🔧 {name}")).color(muted()).size(12.0));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            ui.add_space(4.0);
+        }
+        if let Some(e) = &self.agent_error {
+            ui.label(RichText::new(e).color(err_text()));
+        }
+        if self.agent.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(&self.agent_status).color(muted()));
+                if ui.small_button("■ Stop").clicked() {
+                    if let Some(a) = &self.agent {
+                        a.cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+        ui.add_space(6.0);
+        let edit = ui.add(
+            egui::TextEdit::multiline(&mut self.agent_input)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .hint_text("e.g. “Make page 3's translations sound more casual”"),
+        );
+        let enter = edit.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
+        ui.horizontal(|ui| {
+            let can = self.agent.is_none() && !self.agent_input.trim().is_empty() && self.open.is_some();
+            if (ui.add_enabled(can, rose_button("Send")).clicked() || (enter && can)) && can {
+                let text = self.agent_input.trim().to_owned();
+                self.agent_input.clear();
+                self.agent_error = None;
+                self.agent = Some(crate::agent::start(
+                    ctx.clone(),
+                    self.settings.clone(),
+                    self.agent_history.clone(),
+                    self.outline(),
+                    text,
+                ));
+            }
+            if !self.agent_history.is_empty() && self.agent.is_none() && ui.small_button("New chat").clicked() {
+                self.agent_history.clear();
+                self.agent_error = None;
+            }
+        });
+        if self.open.is_none() {
+            ui.label(RichText::new("Open a comic to use the assistant.").color(muted()));
         }
     }
 
@@ -2314,7 +2598,7 @@ impl App {
                             }
                         } else if ui
                             .add(rose_button("▶ Run").min_size(vec2(90.0, 34.0)))
-                            .on_hover_text("Run the steps chosen in the Translate tab")
+                            .on_hover_text("Run the steps chosen in the Setup tab")
                             .clicked()
                         {
                             let steps = self.steps;
@@ -3024,7 +3308,7 @@ impl App {
                         if ui.button("Copy text").clicked() {
                             ui.ctx().copy_text(problem.clone());
                         }
-                        if ui.button("Open the Translate tab").clicked() {
+                        if ui.button("Open the Setup tab").clicked() {
                             self.tab = Tab::Translate;
                             keep = false;
                         }

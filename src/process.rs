@@ -117,12 +117,12 @@ fn summary(t: &Tally, pages: usize, steps: Steps, had_problems: bool) -> String 
             s.push_str(if steps.find {
                 " No text was found. Draw text boxes with the Text tool (T), then press Run again."
             } else {
-                " There are no text boxes yet. Draw them with the Text tool (T), or turn on \"Find text\" in the Translate tab."
+                " There are no text boxes yet. Draw them with the Text tool (T), or turn on \"Find text\" in the Setup tab."
             });
         } else if t.with_text == 0 {
             s.push_str(" The boxes have no original text yet: type it in, or turn on \"Read the original text\".");
         } else {
-            s.push_str(" Turn on the steps you want in the Translate tab.");
+            s.push_str(" Turn on the steps you want in the Setup tab.");
         }
     }
     s
