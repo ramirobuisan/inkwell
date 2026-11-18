@@ -145,6 +145,9 @@ struct Open {
     zoom: f32,
     pan: Vec2,
     fit: bool,
+    /// Keep fitting the page while the person hasn't zoomed or panned.
+    auto_fit: bool,
+    last_area: Vec2,
     undo: Vec<(usize, Vec<Block>)>,
     redo: Vec<(usize, Vec<Block>)>,
     coalesce: Option<(u64, u8)>,
@@ -180,6 +183,8 @@ impl Open {
             zoom: 1.0,
             pan: Vec2::ZERO,
             fit: true,
+            auto_fit: true,
+            last_area: Vec2::ZERO,
             undo: Vec::new(),
             redo: Vec::new(),
             coalesce: None,
@@ -2227,9 +2232,9 @@ impl App {
                 ui.horizontal(|ui| {
                     if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Picker) {
                         ui.label(RichText::new(match self.tool {
-                            Tool::Eraser => "⌫ Eraser",
+                            Tool::Eraser => "🗙 Eraser",
                             Tool::Picker => "💧 Click the page to pick a colour",
-                            _ => "🖌 Cleanup brush",
+                            _ => "✏ Cleanup brush",
                         }).strong());
                         ui.add(egui::Slider::new(&mut self.brush_size, 2.0..=200.0).logarithmic(true).suffix(" px").text("Size"));
                         if self.tool != Tool::Eraser {
@@ -2332,11 +2337,16 @@ impl App {
                 let Some(o) = &mut self.open else { return };
                 ui.horizontal(|ui| {
                     ui.spacing_mut().slider_width = 100.0;
-                    ui.add(
-                        egui::Slider::new(&mut o.zoom, 0.05..=8.0)
-                            .logarithmic(true)
-                            .show_value(false),
-                    );
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut o.zoom, 0.05..=8.0)
+                                .logarithmic(true)
+                                .show_value(false),
+                        )
+                        .changed()
+                    {
+                        o.auto_fit = false;
+                    }
                     ui.label(format!("{:.0}%", o.zoom * 100.0));
                     if ui.small_button("Fit").clicked() {
                         o.fit = true;
@@ -2423,7 +2433,12 @@ impl App {
                 } else {
                     vec2(1000.0, 1400.0)
                 };
+                if o.auto_fit && area.size() != o.last_area {
+                    o.fit = true;
+                }
+                o.last_area = area.size();
                 if o.fit {
+                    o.auto_fit = true;
                     o.zoom = ((area.width() - 120.0) / size.x)
                         .min((area.height() - 48.0) / size.y)
                         .clamp(0.05, 8.0);
@@ -2442,8 +2457,10 @@ impl App {
                         let new_origin = anchor - (anchor - origin) * f;
                         o.pan += new_origin - (area.center() + o.pan - size * new_zoom / 2.0);
                         o.zoom = new_zoom;
+                        o.auto_fit = false;
                     } else if scroll != Vec2::ZERO {
                         o.pan += scroll;
+                        o.auto_fit = false;
                     }
                 }
                 let zoom = o.zoom;
@@ -2651,7 +2668,10 @@ impl App {
                         }
                         match &o.drag {
                             Some(Drag::Paint { .. }) => {}
-                            Some(Drag::Pan) => o.pan += resp.drag_delta(),
+                            Some(Drag::Pan) => {
+                                o.pan += resp.drag_delta();
+                                o.auto_fit = false;
+                            }
                             Some(Drag::Move { id, grab }) => {
                                 let (id, grab) = (*id, *grab);
                                 if let Some(b) = o.block_mut(id) {
@@ -2786,8 +2806,8 @@ impl App {
                                         (Tool::Select, "⬉", "Select and move boxes (V)"),
                                         (Tool::Text, "T", "Draw a text box (T)"),
                                         (Tool::Pan, "✋", "Move the page (H)"),
-                                        (Tool::Brush, "🖌", "Cleanup brush: paint over the original lettering (B)"),
-                                        (Tool::Eraser, "⌫", "Eraser: remove cleanup paint (E)"),
+                                        (Tool::Brush, "✏", "Cleanup brush: paint over the original lettering (B)"),
+                                        (Tool::Eraser, "🗙", "Eraser: remove cleanup paint (E)"),
                                         (Tool::Picker, "💧", "Pick a brush colour from the page (I)"),
                                     ] {
                                         let on = tool == t;
