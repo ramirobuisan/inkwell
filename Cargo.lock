@@ -3085,6 +3085,7 @@ name = "inkwell"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "anyhow",
  "ar-reshaper",
  "dirs 5.0.1",
  "eframe",
@@ -3092,11 +3093,13 @@ dependencies = [
  "image",
  "koharu-ml",
  "koharu-runtime",
+ "kurbo",
  "libc",
  "rars",
  "rfd",
  "serde",
  "serde_json",
+ "tokio",
  "unicode-bidi",
  "ureq",
  "winit",

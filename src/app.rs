@@ -997,6 +997,25 @@ impl App {
                         }
                     }
                     process::Msg::Error(e) => errors.push(e),
+                    process::Msg::Paint { index, layer, cleaned } => {
+                        // LaMa's repaint goes on the cleanup layer as one undo step.
+                        let before = o.paint_layer(index).map(|img| img.clone());
+                        if let (Some(before), Some((x, y, _))) = (before, crate::psd::trim(&layer)) {
+                            if let Some(img) = o.paints.get_mut(&index) {
+                                textfit::paste(img, &layer, 0.0, 0.0);
+                            }
+                            let b = [x, y, layer.width(), layer.height()];
+                            let patch = crate::paint::Patch { x, y, img: crate::paint::crop(&before, b) };
+                            o.push_paint(index, patch);
+                            o.paint_tex.remove(&index);
+                            if let Some(p) = o.data.pages.get_mut(index) {
+                                for blk in p.blocks.iter_mut().filter(|blk| cleaned.contains(&blk.id)) {
+                                    blk.cover = false;
+                                }
+                            }
+                            o.changed();
+                        }
+                    }
                     process::Msg::Finished { cancelled, summary } => {
                         finished = Some((cancelled, summary))
                     }
@@ -2476,7 +2495,22 @@ impl App {
         );
 
         ui.add_space(8.0);
-        section(ui, "👁", "Reading text (Tesseract)", None);
+        section(ui, "👁", "Finding, reading and cleaning up text", None);
+        let koharu_ok = crate::ml::available();
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(koharu_ok, |ui| {
+                ui.radio_value(&mut self.settings.vision, "koharu".to_owned(), "Koharu's models (original)")
+                    .on_hover_text("Layout detection, manga-ocr and LaMa repainting, from the original's open-source code");
+            });
+            ui.radio_value(&mut self.settings.vision, "tesseract".to_owned(), "Tesseract");
+        });
+        if !koharu_ok {
+            ui.label(RichText::new("Koharu's models aren't on this computer (they come with the original Koharu's first run).").color(muted()).size(12.5));
+        } else if self.settings.vision == "koharu" {
+            ui.label(RichText::new("Runs on this laptop's processor; the first page takes longer while the models load.").color(muted()).size(12.5));
+        }
+        ui.add_space(4.0);
+        caps(ui, "TESSERACT");
         match &self.langs {
             None => {
                 ui.label(RichText::new("Tesseract isn't installed. Install the 'tesseract' package to find and read text.").color(rose()));

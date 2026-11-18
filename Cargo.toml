@@ -8,6 +8,9 @@ description = "Manga page translation workbench: drop comics, add text, translat
 # Koharu's own models (vendor/, MIT OR Apache-2.0).
 koharu-ml = { workspace = true }
 koharu-runtime = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+kurbo = { workspace = true }
 eframe = "0.31"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -6,6 +6,7 @@ mod app;
 mod export;
 mod import;
 mod launcher;
+mod ml;
 mod paint;
 mod psd;
 mod process;
@@ -72,6 +73,13 @@ fn main() -> eframe::Result<()> {
                         println!("box {id}: {:?} -> {:?}", source, translation)
                     }
                     process::Msg::Error(e) => println!("problem: {e}"),
+                    process::Msg::Paint { layer, cleaned, .. } => {
+                        let painted = layer.pixels().filter(|p| p.0[3] > 0).count();
+                        println!("repainted {painted} pixels under {} boxes", cleaned.len());
+                        if let Ok(out) = std::env::var("INKWELL_SAVE_PAINT") {
+                            let _ = layer.save(out);
+                        }
+                    }
                     process::Msg::Finished { .. } => {
                         println!("finished");
                         break;

@@ -63,6 +63,13 @@ pub enum Msg {
     },
     /// A problem the person should read (shown in a window, not a passing note).
     Error(String),
+    /// Artwork LaMa repainted under a page's lettering, as cleanup-layer pixels, and the
+    /// boxes it cleaned (which then need no cover).
+    Paint {
+        index: usize,
+        layer: image::RgbaImage,
+        cleaned: Vec<u64>,
+    },
     Finished {
         cancelled: bool,
         /// What the run did, in plain words.
@@ -152,7 +159,8 @@ pub fn start(
             let mut steps = steps;
             let mut problems: Vec<String> = Vec::new();
             // Reading text needs Tesseract and the chosen language pack.
-            if (steps.find || steps.read) && !langs.contains(&settings.ocr_lang) {
+            let mut use_koharu = settings.vision == "koharu" && crate::ml::available();
+            if !use_koharu && (steps.find || steps.read) && !langs.contains(&settings.ocr_lang) {
                 problems.push(ai::missing_language_help(&settings.ocr_lang, langs.is_empty()));
                 steps.find = false;
                 steps.read = false;
@@ -189,7 +197,31 @@ pub fn start(
                 } else {
                     None
                 };
-                if steps.find && blocks.is_empty() {
+                let mut glyphs: Option<image::GrayImage> = None;
+                if steps.find && blocks.is_empty() && use_koharu {
+                    if let Some(p) = &picture {
+                        send(Msg::Progress { done: n, total, label: format!("Finding text on page {} of {total} (Koharu's model)", n + 1) });
+                        match crate::ml::find(p) {
+                            Ok((mut found, mask)) => {
+                                for b in &mut found {
+                                    b.id = next_id;
+                                    next_id += 1;
+                                }
+                                tally.found += found.len();
+                                if !found.is_empty() {
+                                    send(Msg::Found { index: job.index, blocks: found.clone() });
+                                }
+                                blocks = found;
+                                glyphs = Some(mask);
+                            }
+                            Err(e) => {
+                                problems.push(format!("Koharu's text finder couldn't run ({e:#}); Tesseract was used instead."));
+                                use_koharu = false;
+                            }
+                        }
+                    }
+                }
+                if steps.find && blocks.is_empty() && !use_koharu {
                     if let Some(p) = &picture {
                         match ai::find_text(p, &settings.ocr_lang) {
                             Ok(mut found) => {
@@ -215,7 +247,33 @@ pub fn start(
                     }
                 }
                 tally.boxes += blocks.len();
-                if steps.read {
+                if steps.read && use_koharu {
+                    if let Some(p) = &picture {
+                        let wanted: Vec<usize> = (0..blocks.len())
+                            .filter(|&i| force_read || blocks[i].source.trim().is_empty())
+                            .collect();
+                        if !wanted.is_empty() {
+                            send(Msg::Progress { done: n, total, label: format!("Reading page {} of {total} (manga-ocr)", n + 1) });
+                            let boxes: Vec<Block> = wanted.iter().map(|&i| blocks[i].clone()).collect();
+                            match crate::ml::read(p, &boxes) {
+                                Ok(texts) => {
+                                    for (&i, text) in wanted.iter().zip(texts) {
+                                        if !text.trim().is_empty() {
+                                            tally.read += 1;
+                                        }
+                                        blocks[i].source = text.clone();
+                                        send(Msg::Update { index: job.index, id: blocks[i].id, source: Some(text), translation: None, cover: None });
+                                    }
+                                }
+                                Err(e) => {
+                                    problems.push(format!("Koharu's text reader couldn't run ({e:#}); Tesseract was used instead."));
+                                    use_koharu = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                if steps.read && !use_koharu {
                     if let Some(p) = &picture {
                         for b in blocks.iter_mut() {
                             if !force_read && !b.source.trim().is_empty() {
@@ -248,9 +306,43 @@ pub fn start(
                         }
                     }
                 }
+                let mut cleaned: Vec<u64> = Vec::new();
+                if steps.clean && use_koharu && !blocks.is_empty() {
+                    if let Some(p) = &picture {
+                        send(Msg::Progress { done: n, total, label: format!("Repainting page {} of {total} (LaMa)", n + 1) });
+                        let found = match glyphs.take() {
+                            Some(m) => Ok(m),
+                            None => crate::ml::find(p).map(|(_, m)| m),
+                        };
+                        let result = found.and_then(|glyphs| {
+                            let mask = crate::ml::mask_in_boxes(&glyphs, &blocks, 7);
+                            if mask.pixels().all(|px| px.0[0] == 0) {
+                                return Ok(None);
+                            }
+                            let repainted = crate::ml::inpaint(p, &mask)?;
+                            Ok(Some((crate::ml::as_layer(&repainted, &mask), mask)))
+                        });
+                        match result {
+                            Ok(Some((layer, mask))) => {
+                                // Boxes with glyphs repainted need no cover.
+                                for b in &blocks {
+                                    let (x0, y0) = (b.x.max(0.0) as u32, b.y.max(0.0) as u32);
+                                    let (x1, y1) = (((b.x + b.w) as u32).min(mask.width()), ((b.y + b.h) as u32).min(mask.height()));
+                                    if (y0..y1).any(|y| (x0..x1).any(|x| mask.get_pixel(x, y).0[0] > 0)) {
+                                        cleaned.push(b.id);
+                                    }
+                                }
+                                tally.cleaned += cleaned.len();
+                                send(Msg::Paint { index: job.index, layer, cleaned: cleaned.clone() });
+                            }
+                            Ok(None) => {}
+                            Err(e) => problems.push(format!("LaMa couldn't repaint the page ({e:#}); the boxes were covered instead.")),
+                        }
+                    }
+                }
                 if steps.clean {
                     if let Some(p) = &picture {
-                        for b in &blocks {
+                        for b in blocks.iter().filter(|b| !cleaned.contains(&b.id)) {
                             tally.cleaned += 1;
                             send(Msg::Update {
                                 index: job.index,

@@ -24,6 +24,9 @@ pub struct Settings {
     pub default_font: String,
     /// "system", "light" or "dark".
     pub theme: String,
+    /// What finds, reads and cleans up text: "koharu" (the original's models) or
+    /// "tesseract".
+    pub vision: String,
 }
 
 /// What this computer has: cores and memory.
@@ -73,6 +76,7 @@ impl Default for Settings {
             autosave_ms: 500,
             default_font: String::new(),
             theme: "system".to_owned(),
+            vision: if crate::ml::available() { "koharu" } else { "tesseract" }.to_owned(),
         }
     }
 }
