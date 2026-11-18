@@ -221,7 +221,7 @@ fn import_new(
         Ok(_) | Err(_) => {
             let error = match written {
                 Err(e) => e,
-                Ok(_) => format!("{} holds no pictures", source.display()),
+                Ok(_) => format!("{} holds no images", source.display()),
             };
             if fresh {
                 // Only the folder this import just made, nothing else.
@@ -284,7 +284,7 @@ fn unpack_zip(
     let file =
         fs::File::open(source).map_err(|e| format!("Can't open {}: {e}", source.display()))?;
     let mut zip = zip::ZipArchive::new(BufReader::new(file))
-        .map_err(|e| format!("{} isn't a readable comic archive: {e}", source.display()))?;
+        .map_err(|e| format!("{} isn't an image or an archive: {e}", source.display()))?;
     let mut members: Vec<(String, usize, u64)> = Vec::new();
     for i in 0..zip.len() {
         let Ok(f) = zip.by_index_raw(i) else { continue };

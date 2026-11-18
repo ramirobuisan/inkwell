@@ -1,13 +1,26 @@
 # Mechanics sheet
 
-The target (`koharu-0.85.2.zip`) is a **source archive**, not a compiled program. It was
-opened with `core_target_open` (target `t_b7404cce40fa`); the native tools refuse it ("A ZIP
-archive is not native machine code") and the archive holds no executable at all, only Rust
-and TypeScript sources, fonts and icons. So there are no function addresses: every value
-below cites the original's **source file and line** instead, which is more exact than
-decompiled code.
-"Source" names the file inside the archive. Values marked *estimated* were looked for and
-not found (or belong to parts the original does with GPU models this rebuild replaces).
+The target (`koharu-0.85.2.zip`) is the **source archive** of Koharu 0.85.2; the native
+tools refuse it (target `t_b7404cce40fa`: "A ZIP archive is not native machine code").
+The **compiled** Koharu 0.85.2 is installed on this laptop as `/usr/bin/koharu` (package
+`koharu-bin 0.85.2-1`, ELF arm64, not stripped, sha256 `e196b586…7261e`, target
+`t_e196b586c4a7`). It was opened with `core_target_open` and its functions decompiled with
+the built-in decompiler (Ghidra isn't installed, so pseudo-C is register-level). Each value
+below cites the compiled function address where one was found, and the source file:line
+it matches. Values marked *estimated* were looked for and not found, or belong to parts
+the original does with GPU models that this rebuild replaces.
+
+## Decompiled from /usr/bin/koharu
+
+| Rule | Value in the compiled program | Address | Rebuild |
+|---|---|---|---|
+| Archive members skipped | glob set `**/__MACOSX/**`, `**/._*`, `**/.DS_Store`, `**/Thumbs.db`, `**/desktop.ini` (string data used by `koharu_desktop::commands::import::METADATA`) | data 0x4a7d71f, builder 0x9302e8 | `import::is_metadata` (same five patterns) |
+| Page order | `in_name_order`: empty list → error; otherwise stable sort of (name, bytes) pairs, 48-byte elements, insertion sort below 21 items | 0x91e568 | `natural_cmp` sort |
+| Import errors | "`<path>` holds no images" (0x3a58ad2); "`<path>` isn't an image, an archive, or a PDF" (0x3a58768) | rodata | same wording ("…an image or an archive", since PDF is left out) |
+| Size search | `koharu_renderer::text::fit::halve`: bisection loop of **8** steps, midpoint `(lo + hi) × 0.5` (`fmov s11, #0.5`), keeps the already placed text when the scale is `1.0` (`fmov s12, #1.0`) | 0x16fc5ec (also 0x16fc894, 0xcfbf04) | `textfit::HALVINGS = 8` |
+| PNG export | `koharu_desktop::commands::export::png`: rasterize, then `write_to(…, ImageFormat::Png)` with no options, i.e. the PNG encoder's **default** compression | 0x91b2ec | `CompressionType::Default` (was Fast) |
+| Undo depth | inlined into the scene session; no separate function found in the first 50 000 functions | — | 20, from source `koharu-scene/src/session.rs:18` |
+| Line height 1.2, shrink floor 0.5, balloon inset 1 em | constants inlined into the renderer | `fit::halve` shows the 0.5/1.0 pair | from source (see "Text fitting") |
 
 ## Import (crates/koharu-desktop/src/commands/import.rs)
 

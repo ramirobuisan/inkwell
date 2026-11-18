@@ -52,7 +52,7 @@ fn render_page(dir: &Path, page: &project::Page, fonts: &FontStore) -> Result<Ve
     let mut out = Cursor::new(Vec::new());
     png::PngEncoder::new_with_quality(
         &mut out,
-        png::CompressionType::Fast,
+        png::CompressionType::Default,
         png::FilterType::Adaptive,
     )
     .write_image(

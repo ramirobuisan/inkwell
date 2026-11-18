@@ -19,6 +19,9 @@ use crate::project::{Align, Block, CoverShape};
 pub const LINE_HEIGHT: f32 = 1.2;
 /// A set size shrinks no smaller than this share of itself: text/fit.rs:66.
 pub const SHRINK_FLOOR: f32 = 0.5;
+/// Bisection steps when searching a size: the compiled `koharu_renderer::text::fit::halve`
+/// (0x16fc5ec) runs a loop of 8 with midpoint `(lo + hi) * 0.5`.
+pub const HALVINGS: usize = 8;
 pub const MIN_PX: f32 = 6.0;
 pub const MAX_PX: f32 = 160.0;
 
@@ -313,7 +316,7 @@ fn fit(sh: &Shaper, text: &str, wf: f32, hf: f32, oval: bool, stroke: f32, size:
             return None;
         }
         let (mut lo, mut hi) = (lo, hi.max(lo));
-        for _ in 0..14 {
+        for _ in 0..HALVINGS {
             let mid = (lo + hi) / 2.0;
             if attempt(mid, 1.0).0 {
                 lo = mid;
