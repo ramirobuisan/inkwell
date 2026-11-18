@@ -15,6 +15,12 @@ cargo build --release
 ./target/release/inkwell
 ```
 
+The first normal start adds **Inkwell** to your desktop's app menu (or run `inkwell --install`,
+or Help → "Add Inkwell to the app menu"), so afterwards you can start it like any other app.
+
+Light and dark mode: the sun/moon button in the top-right corner, or the Theme menu
+(Light, Dark, Same as system).
+
 `inkwell --screenshot out.png` draws ~120 frames, saves a picture of the window and exits.
 `inkwell --export-cbz <project folder>` exports without opening the window.
 

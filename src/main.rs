@@ -4,6 +4,7 @@ mod ai;
 mod app;
 mod export;
 mod import;
+mod launcher;
 mod process;
 mod project;
 mod session;
@@ -20,7 +21,19 @@ fn main() -> eframe::Result<()> {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
-        if a == "--screenshot" {
+        if a == "--install" {
+            // Only add Inkwell to the desktop's app menu, then exit.
+            match launcher::install(true) {
+                Ok(p) => {
+                    println!("Added to the app menu: {}", p.map(|p| p.display().to_string()).unwrap_or_default());
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Couldn't add Inkwell to the app menu: {e}");
+                    std::process::exit(1);
+                }
+            }
+        } else if a == "--screenshot" {
             screenshot = args.next().map(PathBuf::from);
         } else if a == "--export-cbz" {
             // Export a comic folder without opening the window (for scripts and checks).

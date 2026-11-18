@@ -30,14 +30,56 @@ use crate::{
     work::{Done, Job, Pool},
 };
 
-pub const ROSE: Color32 = Color32::from_rgb(0xf4, 0x3f, 0x5e);
-pub const ROSE_SOFT: Color32 = Color32::from_rgb(0xff, 0xe4, 0xe6);
-pub const ROSE_MID: Color32 = Color32::from_rgb(0xfe, 0xcd, 0xd3);
-const SIDEBAR: Color32 = Color32::from_rgb(0xfa, 0xfa, 0xfa);
-const BORDER: Color32 = Color32::from_rgb(0xe5, 0xe5, 0xe5);
-const TEXT: Color32 = Color32::from_rgb(0x25, 0x25, 0x25);
-const MUTED: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
-const CANVAS: Color32 = Color32::from_rgb(0xf4, 0xf4, 0xf5);
+// ---------- theme ----------
+// Light colours from the original's light theme, dark ones from its `.dark` block
+// (packages/ui/src/styles: background oklch(.145), card/sidebar oklch(.205),
+// secondary oklch(.269), muted text oklch(.708), primary rose-400, accent rose-950).
+
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn dark() -> bool {
+    DARK.load(Ordering::Relaxed)
+}
+
+macro_rules! themed {
+    ($($name:ident = $light:expr, $dark:expr;)*) => {
+        $(fn $name() -> Color32 { if dark() { $dark } else { $light } })*
+    };
+}
+
+const fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+themed! {
+    rose = rgb(0xf43f5e), rgb(0xfb7185);
+    rose_soft = rgb(0xffe4e6), rgb(0x4c0519);
+    rose_mid = rgb(0xfecdd3), rgb(0x881337);
+    on_rose = Color32::WHITE, rgb(0x0a0a0a);
+    surface = Color32::WHITE, rgb(0x0a0a0a);
+    sidebar = rgb(0xfafafa), rgb(0x171717);
+    border = rgb(0xe5e5e5), rgb(0x2a2a2a);
+    text_c = rgb(0x252525), rgb(0xfafafa);
+    muted = rgb(0x737373), rgb(0xa1a1a1);
+    canvas_c = rgb(0xf4f4f5), rgb(0x18181b);
+    chip = rgb(0xf5f5f5), rgb(0x262626);
+    hover_c = rgb(0xf3f3f3), rgb(0x222222);
+    placeholder = rgb(0xececec), rgb(0x2a2a2a);
+    menubar = rgb(0xfff5f6), rgb(0x1a0f12);
+    banner_bg = rgb(0xfff7ed), rgb(0x431407);
+    banner_line = rgb(0xfdba74), rgb(0x9a3412);
+    banner_text = rgb(0x9a3412), rgb(0xfed7aa);
+    err_bg = rgb(0xfef2f2), rgb(0x450a0a);
+    err_text = rgb(0xb91c1c), rgb(0xfecaca);
+    ok_text = rgb(0x16a34a), rgb(0x4ade80);
+}
+
+/// A translucent rose (selection fills, drop overlay).
+fn rose_a(alpha: u8) -> Color32 {
+    let c = rose();
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
 const ROW_H: f32 = 84.0;
 /// History steps kept before the oldest is dropped: koharu-scene session.rs:18 (`STEPS`).
 const UNDO_STEPS: usize = 20;
@@ -258,6 +300,8 @@ pub struct App {
     picker: Option<Receiver<Vec<PathBuf>>>,
     folder_picker: Option<Receiver<PathBuf>>,
     open_after_import: bool,
+    applied_dark: Option<bool>,
+    run_problem: Option<String>,
 }
 
 fn setup_style(ctx: &egui::Context, fonts: &FontStore) {
@@ -272,18 +316,34 @@ fn setup_style(ctx: &egui::Context, fonts: &FontStore) {
         }
     }
     ctx.set_fonts(defs);
+    ctx.all_styles_mut(|style| {
+        style.spacing.item_spacing = vec2(8.0, 6.0);
+        style.spacing.button_padding = vec2(10.0, 5.0);
+        style.spacing.interact_size.y = 26.0;
+        use egui::TextStyle::*;
+        style.text_styles.insert(Body, FontId::proportional(14.0));
+        style.text_styles.insert(Button, FontId::proportional(14.0));
+        style.text_styles.insert(Heading, FontId::proportional(20.0));
+        style.text_styles.insert(Small, FontId::proportional(11.5));
+    });
+}
 
-    let mut v = egui::Visuals::light();
-    v.panel_fill = Color32::WHITE;
-    v.window_fill = Color32::WHITE;
-    v.extreme_bg_color = SIDEBAR;
-    v.faint_bg_color = SIDEBAR;
-    v.override_text_color = Some(TEXT);
-    v.hyperlink_color = ROSE;
-    v.selection.bg_fill = ROSE_MID;
-    v.selection.stroke = Stroke::new(1.0_f32, ROSE);
+/// Switches every colour of the window to the light or the dark theme.
+fn apply_theme(ctx: &egui::Context, is_dark: bool) {
+    DARK.store(is_dark, Ordering::Relaxed);
+    let theme = if is_dark { egui::Theme::Dark } else { egui::Theme::Light };
+    ctx.set_theme(theme);
+    let mut v = if is_dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    v.panel_fill = surface();
+    v.window_fill = surface();
+    v.extreme_bg_color = sidebar();
+    v.faint_bg_color = sidebar();
+    v.override_text_color = Some(text_c());
+    v.hyperlink_color = rose();
+    v.selection.bg_fill = rose_mid();
+    v.selection.stroke = Stroke::new(1.0_f32, rose());
     v.window_corner_radius = CornerRadius::same(12);
-    v.window_stroke = Stroke::new(1.0_f32, BORDER);
+    v.window_stroke = Stroke::new(1.0_f32, border());
     for w in [
         &mut v.widgets.inactive,
         &mut v.widgets.hovered,
@@ -293,30 +353,21 @@ fn setup_style(ctx: &egui::Context, fonts: &FontStore) {
     ] {
         w.corner_radius = CornerRadius::same(8);
     }
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
-    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(0xf5, 0xf5, 0xf5);
-    v.widgets.inactive.bg_fill = Color32::from_rgb(0xf0, 0xf0, 0xf0);
-    v.widgets.hovered.weak_bg_fill = ROSE_SOFT;
-    v.widgets.hovered.bg_fill = ROSE_SOFT;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ROSE_MID);
-    v.widgets.active.weak_bg_fill = ROSE_MID;
-    v.widgets.active.bg_fill = ROSE_MID;
-    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, ROSE);
-    v.widgets.open.weak_bg_fill = ROSE_SOFT;
-    ctx.set_visuals(v);
-
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = vec2(8.0, 6.0);
-    style.spacing.button_padding = vec2(10.0, 5.0);
-    style.spacing.interact_size.y = 26.0;
-    use egui::TextStyle::*;
-    style.text_styles.insert(Body, FontId::proportional(14.0));
-    style.text_styles.insert(Button, FontId::proportional(14.0));
-    style
-        .text_styles
-        .insert(Heading, FontId::proportional(20.0));
-    style.text_styles.insert(Small, FontId::proportional(11.5));
-    ctx.set_style(style);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, border());
+    v.widgets.inactive.weak_bg_fill = chip();
+    v.widgets.inactive.bg_fill = hover_c();
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, text_c());
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, text_c());
+    v.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, text_c());
+    v.widgets.active.fg_stroke = Stroke::new(1.5_f32, text_c());
+    v.widgets.hovered.weak_bg_fill = rose_soft();
+    v.widgets.hovered.bg_fill = rose_soft();
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, rose_mid());
+    v.widgets.active.weak_bg_fill = rose_mid();
+    v.widgets.active.bg_fill = rose_mid();
+    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, rose());
+    v.widgets.open.weak_bg_fill = rose_soft();
+    ctx.set_visuals_of(theme, v);
 }
 
 fn ago(t: Option<SystemTime>) -> String {
@@ -340,27 +391,27 @@ fn open_in_files(path: &Path) {
 fn rose_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(
         RichText::new(text.to_owned())
-            .color(Color32::WHITE)
+            .color(on_rose())
             .strong(),
     )
-    .fill(ROSE)
+    .fill(rose())
     .corner_radius(CornerRadius::same(10))
 }
 
 fn section(ui: &mut egui::Ui, icon: &str, title: &str, count: Option<usize>) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(icon).color(ROSE).size(16.0));
+        ui.label(RichText::new(icon).color(rose()).size(16.0));
         ui.label(RichText::new(title).size(15.0).strong());
         if let Some(n) = count {
-            ui.label(RichText::new(n.to_string()).color(MUTED));
+            ui.label(RichText::new(n.to_string()).color(muted()));
         }
     });
     ui.add_space(2.0);
 }
 
 fn caps(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(11.0).color(MUTED).strong());
+    ui.label(RichText::new(text).size(11.0).color(muted()).strong());
 }
 
 fn dashed_rect(painter: &egui::Painter, r: Rect, stroke: Stroke, dash: f32, gap: f32) {
@@ -428,6 +479,8 @@ impl App {
             picker: None,
             folder_picker: None,
             open_after_import: false,
+            applied_dark: None,
+            run_problem: None,
         };
         let mut notes = Vec::new();
         if crashed {
@@ -457,6 +510,11 @@ impl App {
         }
         if !files.is_empty() {
             app.take_paths(files);
+        }
+        if app.screenshot.is_none() {
+            if let Ok(Some(_)) = crate::launcher::install(false) {
+                app.toast("Inkwell is now in your app launcher: search for “Inkwell” to start it.", false);
+            }
         }
         app
     }
@@ -751,20 +809,23 @@ impl App {
                         }
                     }
                     process::Msg::Error(e) => errors.push(e),
-                    process::Msg::Finished { cancelled } => finished = Some(cancelled),
+                    process::Msg::Finished { cancelled, summary } => {
+                        finished = Some((cancelled, summary))
+                    }
                 }
             }
         }
-        for e in errors {
-            self.toast(e, true);
+        if !errors.is_empty() {
+            self.run_problem = Some(errors.join("\n\n"));
         }
-        if let Some(cancelled) = finished {
+        if let Some((cancelled, summary)) = finished {
             self.running = None;
             self.touched.clear();
             if let Some(o) = &mut self.open {
                 o.save();
             }
-            self.toast(if cancelled { "Stopped." } else { "Finished." }, false);
+            let text = if cancelled { format!("Stopped. {summary}") } else { summary };
+            self.toast(text, false);
         }
 
         // Export.
@@ -982,12 +1043,12 @@ impl App {
         egui::TopBottomPanel::top("menu")
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(0xff, 0xf5, 0xf6))
+                    .fill(menubar())
                     .inner_margin(egui::Margin::symmetric(10, 6)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("✒").color(ROSE).size(18.0));
+                    ui.label(RichText::new("✒").color(rose()).size(18.0));
                     egui::menu::bar(ui, |ui| {
                         ui.menu_button("File", |ui| {
                             if ui.button("Import comics…").clicked() {
@@ -1137,7 +1198,24 @@ impl App {
                                 ui.label("Open a comic first.");
                             }
                         });
+                        ui.menu_button("Theme", |ui| {
+                            let before = self.settings.theme.clone();
+                            ui.radio_value(&mut self.settings.theme, "light".to_owned(), "☀ Light");
+                            ui.radio_value(&mut self.settings.theme, "dark".to_owned(), "🌙 Dark");
+                            ui.radio_value(&mut self.settings.theme, "system".to_owned(), "💻 Same as system");
+                            if self.settings.theme != before {
+                                self.settings.save();
+                                ui.close_menu();
+                            }
+                        });
                         ui.menu_button("Help", |ui| {
+                            if ui.button("Add Inkwell to the app menu").clicked() {
+                                match crate::launcher::install(true) {
+                                    Ok(_) => self.toast("Inkwell is in your app menu: search for “Inkwell”.", false),
+                                    Err(e) => self.toast(format!("Couldn't add it to the app menu: {e}"), true),
+                                }
+                                ui.close_menu();
+                            }
                             if ui.button("About and shortcuts").clicked() {
                                 self.about_open = true;
                                 ui.close_menu();
@@ -1162,9 +1240,18 @@ impl App {
                         Align2::CENTER_CENTER,
                         title,
                         FontId::proportional(15.0),
-                        TEXT,
+                        text_c(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (icon, tip, next) = if dark() {
+                            ("☀", "Switch to light mode", "light")
+                        } else {
+                            ("🌙", "Switch to dark mode", "dark")
+                        };
+                        if ui.button(icon).on_hover_text(tip).clicked() {
+                            self.settings.theme = next.to_owned();
+                            self.settings.save();
+                        }
                         if self.open.is_some() && ui.button("◀ Library").clicked() {
                             self.close_project();
                         }
@@ -1179,20 +1266,20 @@ impl App {
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(SIDEBAR)
+                    .fill(sidebar())
                     .inner_margin(egui::Margin::symmetric(10, 10))
-                    .stroke(Stroke::new(1.0_f32, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, border())),
             )
             .show(ctx, |ui| {
                 let Some(o) = &mut self.open else { return };
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Pages").size(17.0).strong());
                     egui::Frame::new()
-                        .fill(ROSE_SOFT)
+                        .fill(rose_soft())
                         .corner_radius(CornerRadius::same(8))
                         .inner_margin(egui::Margin::symmetric(8, 2))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(o.data.pages.len().to_string()).color(ROSE));
+                            ui.label(RichText::new(o.data.pages.len().to_string()).color(rose()));
                         });
                 });
                 ui.add_space(4.0);
@@ -1245,12 +1332,12 @@ impl App {
                         let p = ui.painter();
                         let current = i == o.data.current;
                         if current {
-                            p.rect_filled(rect, CornerRadius::same(12), ROSE_SOFT);
+                            p.rect_filled(rect, CornerRadius::same(12), rose_soft());
                         } else if resp.hovered() {
                             p.rect_filled(
                                 rect,
                                 CornerRadius::same(12),
-                                Color32::from_rgb(0xf3, 0xf3, 0xf3),
+                                hover_c(),
                             );
                         }
                         let thumb = Rect::from_min_size(
@@ -1271,12 +1358,12 @@ impl App {
                                 p.rect_stroke(
                                     r,
                                     2.0,
-                                    Stroke::new(1.0_f32, BORDER),
+                                    Stroke::new(1.0_f32, border()),
                                     StrokeKind::Outside,
                                 );
                             }
                             None => {
-                                p.rect_filled(thumb, 4.0, Color32::from_rgb(0xec, 0xec, 0xec));
+                                p.rect_filled(thumb, 4.0, placeholder());
                             }
                         }
                         let x = thumb.right() + 12.0;
@@ -1289,7 +1376,7 @@ impl App {
                             Align2::LEFT_TOP,
                             name,
                             FontId::proportional(14.0),
-                            TEXT,
+                            text_c(),
                         );
                         let n = page.blocks.len();
                         p.text(
@@ -1297,7 +1384,7 @@ impl App {
                             Align2::LEFT_TOP,
                             format!("{} text box{}", n, if n == 1 { "" } else { "es" }),
                             FontId::proportional(12.5),
-                            MUTED,
+                            muted(),
                         );
                         if page.width > 0 {
                             p.text(
@@ -1305,7 +1392,7 @@ impl App {
                                 Align2::LEFT_TOP,
                                 format!("{} × {}", page.width, page.height),
                                 FontId::proportional(12.5),
-                                MUTED,
+                                muted(),
                             );
                         }
                         if resp.clicked() {
@@ -1328,9 +1415,9 @@ impl App {
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::WHITE)
+                    .fill(surface())
                     .inner_margin(egui::Margin::symmetric(12, 10))
-                    .stroke(Stroke::new(1.0_f32, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, border())),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -1342,9 +1429,9 @@ impl App {
                         let on = self.tab == tab;
                         let b = egui::Button::new(RichText::new(label).size(14.5))
                             .fill(if on {
-                                Color32::from_rgb(0xf3, 0xf3, 0xf3)
+                                hover_c()
                             } else {
-                                Color32::WHITE
+                                surface()
                             })
                             .stroke(Stroke::NONE)
                             .corner_radius(CornerRadius::same(10))
@@ -1373,7 +1460,7 @@ impl App {
             section(ui, "T", "Type", None);
             match selected {
                 None => {
-                    ui.label(RichText::new("Select a text box on the page, or draw one with the Text tool (T). Run ▶ can find the text for you.").color(MUTED));
+                    ui.label(RichText::new("Select a text box on the page, or draw one with the Text tool (T). Run ▶ can find the text for you.").color(muted()));
                 }
                 Some(mut b) => {
                     let before = b.clone();
@@ -1452,9 +1539,9 @@ impl App {
                         ] {
                             let on = b.align == a;
                             let btn = egui::Button::new(label).fill(if on {
-                                ROSE_MID
+                                rose_mid()
                             } else {
-                                Color32::from_rgb(0xf5, 0xf5, 0xf5)
+                                chip()
                             });
                             if ui.add(btn).clicked() {
                                 b.align = a;
@@ -1463,7 +1550,7 @@ impl App {
                     });
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            caps(ui, "BORDER");
+                            caps(ui, "border()");
                             ui.color_edit_button_srgba_unmultiplied(&mut b.stroke);
                         });
                         ui.vertical(|ui| {
@@ -1584,16 +1671,16 @@ impl App {
                         ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
                     let painter = ui.painter();
                     if on {
-                        painter.rect_filled(rect, 8.0, ROSE_SOFT);
+                        painter.rect_filled(rect, 8.0, rose_soft());
                     } else if resp.hovered() {
-                        painter.rect_filled(rect, 8.0, Color32::from_rgb(0xf5, 0xf5, 0xf5));
+                        painter.rect_filled(rect, 8.0, chip());
                     }
                     painter.text(
                         pos2(rect.left() + 12.0, rect.center().y),
                         Align2::LEFT_CENTER,
                         "T",
                         FontId::proportional(18.0),
-                        MUTED,
+                        muted(),
                     );
                     let mut label = b.label();
                     if label.chars().count() > 26 {
@@ -1604,7 +1691,7 @@ impl App {
                         Align2::LEFT_TOP,
                         label,
                         FontId::proportional(14.0),
-                        TEXT,
+                        text_c(),
                     );
                     let kind = if b.translation.trim().is_empty() {
                         "Not translated"
@@ -1616,7 +1703,7 @@ impl App {
                         Align2::LEFT_TOP,
                         kind,
                         FontId::proportional(11.5),
-                        MUTED,
+                        muted(),
                     );
                     let eye = Rect::from_center_size(
                         pos2(rect.right() - 16.0, rect.center().y),
@@ -1627,7 +1714,7 @@ impl App {
                         Align2::CENTER_CENTER,
                         if b.visible { "👁" } else { "—" },
                         FontId::proportional(15.0),
-                        if b.visible { TEXT } else { MUTED },
+                        if b.visible { text_c() } else { muted() },
                     );
                     if resp.clicked() {
                         let hit_eye = resp
@@ -1649,28 +1736,28 @@ impl App {
                 Align2::LEFT_CENTER,
                 "🖼",
                 FontId::proportional(16.0),
-                MUTED,
+                muted(),
             );
             painter.text(
                 pos2(rect.left() + 36.0, rect.top() + 6.0),
                 Align2::LEFT_TOP,
                 "Original artwork",
                 FontId::proportional(14.0),
-                TEXT,
+                text_c(),
             );
             painter.text(
                 pos2(rect.left() + 36.0, rect.top() + 26.0),
                 Align2::LEFT_TOP,
                 "Image",
                 FontId::proportional(11.5),
-                MUTED,
+                muted(),
             );
             painter.text(
                 pos2(rect.right() - 16.0, rect.center().y),
                 Align2::CENTER_CENTER,
                 "🔒",
                 FontId::proportional(14.0),
-                MUTED,
+                muted(),
             );
             if let Some(id) = select {
                 o.selected = Some(id);
@@ -1691,7 +1778,7 @@ impl App {
     fn translate_tab(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.clone();
         section(ui, "🌐", "Translation server", None);
-        ui.label(RichText::new("Any OpenAI-compatible chat server: Ollama on this laptop, LM Studio, or an online API.").color(MUTED).size(12.5));
+        ui.label(RichText::new("Any OpenAI-compatible chat server: Ollama on this laptop, LM Studio, or an online API.").color(muted()).size(12.5));
         caps(ui, "SERVER ADDRESS");
         ui.add(
             egui::TextEdit::singleline(&mut self.settings.endpoint).desired_width(f32::INFINITY),
@@ -1743,7 +1830,7 @@ impl App {
         section(ui, "👁", "Reading text (Tesseract)", None);
         match &self.langs {
             None => {
-                ui.label(RichText::new("Tesseract isn't installed. Install the 'tesseract' package to find and read text.").color(ROSE));
+                ui.label(RichText::new("Tesseract isn't installed. Install the 'tesseract' package to find and read text.").color(rose()));
             }
             Some(langs) => {
                 caps(ui, "TEXT LANGUAGE ON THE PAGES");
@@ -1773,7 +1860,7 @@ impl App {
                             "The '{}' language pack isn't installed. On Arch: sudo pacman -S tesseract-data-{}",
                             self.settings.ocr_lang, self.settings.ocr_lang
                         ))
-                        .color(ROSE)
+                        .color(rose())
                         .size(12.5),
                     );
                 }
@@ -1798,7 +1885,7 @@ impl App {
         egui::TopBottomPanel::top("runbar")
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::WHITE)
+                    .fill(surface())
                     .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
@@ -1813,7 +1900,7 @@ impl App {
                             egui::ProgressBar::new(frac)
                                 .desired_width(220.0)
                                 .text(r.label.clone())
-                                .fill(ROSE),
+                                .fill(rose()),
                         );
                     } else if let Some(e) = &self.exporting {
                         let frac = if e.total == 0 {
@@ -1825,7 +1912,7 @@ impl App {
                             egui::ProgressBar::new(frac)
                                 .desired_width(220.0)
                                 .text(format!("Exporting {}/{}", e.done, e.total))
-                                .fill(ROSE),
+                                .fill(rose()),
                         );
                     }
                     if let Some(r) = self.imports.iter().find(|r| matches!(r.state, ImportState::Running)) {
@@ -1834,7 +1921,7 @@ impl App {
                             egui::ProgressBar::new(frac)
                                 .desired_width(200.0)
                                 .text(format!("New project “{}” {}/{}", r.name, r.done, r.total))
-                                .fill(ROSE),
+                                .fill(rose()),
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1862,7 +1949,7 @@ impl App {
                         }
                         let model = format!("🌐  {}  ⏷", self.settings.model);
                         let chip = egui::Button::new(RichText::new(model).size(14.5))
-                            .fill(Color32::from_rgb(0xf5, 0xf5, 0xf5))
+                            .fill(chip())
                             .stroke(Stroke::NONE)
                             .corner_radius(CornerRadius::same(10))
                             .min_size(vec2(0.0, 34.0));
@@ -1890,9 +1977,9 @@ impl App {
         egui::TopBottomPanel::bottom("zoombar")
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::WHITE)
+                    .fill(surface())
                     .inner_margin(egui::Margin::symmetric(12, 6))
-                    .stroke(Stroke::new(1.0_f32, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, border())),
             )
             .show(ctx, |ui| {
                 let Some(o) = &mut self.open else { return };
@@ -1909,11 +1996,11 @@ impl App {
                     }
                     ui.separator();
                     let status = if let Some(e) = &o.save_error {
-                        RichText::new(format!("⚠ Not saved: {e}")).color(ROSE)
+                        RichText::new(format!("⚠ Not saved: {e}")).color(rose())
                     } else if o.dirty {
-                        RichText::new("● Saving…").color(MUTED)
+                        RichText::new("● Saving…").color(muted())
                     } else {
-                        RichText::new("✔ Saved").color(MUTED)
+                        RichText::new("✔ Saved").color(muted())
                     };
                     ui.label(status.size(12.5));
                     if let Some(p) = self.last_export.clone() {
@@ -1934,7 +2021,7 @@ impl App {
                             let short = format!("{} / {}", o.data.current + 1, o.data.pages.len());
                             let room = ui.available_width();
                             let text = if room > 190.0 { full } else if room > 60.0 { short } else { String::new() };
-                            ui.label(RichText::new(text).color(MUTED).size(12.5));
+                            ui.label(RichText::new(text).color(muted()).size(12.5));
                         }
                     });
                 });
@@ -1949,7 +2036,7 @@ impl App {
         let mut new_tool = None;
         let mut to_props = false;
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(CANVAS))
+            .frame(egui::Frame::new().fill(canvas_c()))
             .show(ctx, |ui| {
                 let Some(o) = &mut self.open else { return };
                 if o.data.pages.is_empty() {
@@ -2039,7 +2126,7 @@ impl App {
                             Align2::CENTER_CENTER,
                             msg,
                             FontId::proportional(15.0),
-                            MUTED,
+                            muted(),
                         );
                     }
                 }
@@ -2079,17 +2166,17 @@ impl App {
                         painter.rect_stroke(
                             r,
                             2.0,
-                            Stroke::new(2.0_f32, ROSE),
+                            Stroke::new(2.0_f32, rose()),
                             StrokeKind::Outside,
                         );
                         let h = Rect::from_center_size(r.max, vec2(10.0, 10.0));
                         painter.rect_filled(h, 2.0, Color32::WHITE);
-                        painter.rect_stroke(h, 2.0, Stroke::new(1.5_f32, ROSE), StrokeKind::Inside);
+                        painter.rect_stroke(h, 2.0, Stroke::new(1.5_f32, rose()), StrokeKind::Inside);
                     } else {
                         let col = if b.translation.trim().is_empty() {
-                            ROSE
+                            rose()
                         } else {
-                            Color32::from_rgba_unmultiplied(0xf4, 0x3f, 0x5e, 90)
+                            rose_a(90)
                         };
                         dashed_rect(&painter, r, Stroke::new(1.2_f32, col), 5.0, 4.0);
                     }
@@ -2183,12 +2270,12 @@ impl App {
                                 painter.rect_filled(
                                     r,
                                     2.0,
-                                    Color32::from_rgba_unmultiplied(0xf4, 0x3f, 0x5e, 30),
+                                    rose_a(30),
                                 );
                                 painter.rect_stroke(
                                     r,
                                     2.0,
-                                    Stroke::new(1.5_f32, ROSE),
+                                    Stroke::new(1.5_f32, rose()),
                                     StrokeKind::Inside,
                                 );
                             }
@@ -2241,9 +2328,9 @@ impl App {
                     .order(egui::Order::Foreground)
                     .show(ctx, |ui| {
                         egui::Frame::new()
-                            .fill(Color32::WHITE)
+                            .fill(surface())
                             .corner_radius(CornerRadius::same(24))
-                            .stroke(Stroke::new(1.0_f32, BORDER))
+                            .stroke(Stroke::new(1.0_f32, border()))
                             .shadow(egui::epaint::Shadow {
                                 offset: [0, 2],
                                 blur: 10,
@@ -2261,12 +2348,12 @@ impl App {
                                         let on = tool == t;
                                         let b = egui::Button::new(
                                             RichText::new(icon).size(20.0).color(if on {
-                                                ROSE
+                                                rose()
                                             } else {
-                                                TEXT
+                                                text_c()
                                             }),
                                         )
-                                        .fill(if on { ROSE_SOFT } else { Color32::WHITE })
+                                        .fill(if on { rose_soft() } else { surface() })
                                         .stroke(Stroke::NONE)
                                         .corner_radius(CornerRadius::same(18))
                                         .min_size(vec2(40.0, 40.0));
@@ -2291,48 +2378,48 @@ impl App {
         let mut pick = false;
         let mut pick_lib = false;
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::same(24)))
+            .frame(egui::Frame::new().fill(sidebar()).inner_margin(egui::Margin::same(24)))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.set_max_width(820.0);
                         ui.add_space(8.0);
-                        ui.label(RichText::new("✒ Inkwell").size(30.0).strong().color(ROSE));
-                        ui.label(RichText::new("Translate manga pages: drop comics, find and read the text, translate, clean up, export.").color(MUTED));
+                        ui.label(RichText::new("✒ Inkwell").size(30.0).strong().color(rose()));
+                        ui.label(RichText::new("Translate manga pages: drop comics, find and read the text, translate, clean up, export.").color(muted()));
                         ui.add_space(14.0);
                         if let Some(b) = &self.banner {
                             egui::Frame::new()
-                                .fill(Color32::from_rgb(0xff, 0xf7, 0xed))
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0xfd, 0xba, 0x74)))
+                                .fill(banner_bg())
+                                .stroke(Stroke::new(1.0_f32, banner_line()))
                                 .corner_radius(CornerRadius::same(10))
                                 .inner_margin(egui::Margin::same(12))
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
-                                    ui.label(RichText::new(format!("🛟  {b}")).color(Color32::from_rgb(0x9a, 0x34, 0x12)));
+                                    ui.label(RichText::new(format!("🛟  {b}")).color(banner_text()));
                                 });
                             ui.add_space(10.0);
                         }
                         // Drop zone.
                         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 190.0), Sense::click());
                         let p = ui.painter();
-                        p.rect_filled(rect, 18.0, if resp.hovered() { ROSE_SOFT } else { Color32::WHITE });
-                        dashed_rect(p, rect.shrink(1.0), Stroke::new(2.0_f32, ROSE_MID), 10.0, 7.0);
-                        p.text(rect.center() - vec2(0.0, 44.0), Align2::CENTER_CENTER, "📥", FontId::proportional(40.0), ROSE);
-                        p.text(rect.center() + vec2(0.0, 6.0), Align2::CENTER_CENTER, "Drop CBZ or ZIP comics here", FontId::proportional(20.0), TEXT);
+                        p.rect_filled(rect, 18.0, if resp.hovered() { rose_soft() } else { surface() });
+                        dashed_rect(p, rect.shrink(1.0), Stroke::new(2.0_f32, rose_mid()), 10.0, 7.0);
+                        p.text(rect.center() - vec2(0.0, 44.0), Align2::CENTER_CENTER, "📥", FontId::proportional(40.0), rose());
+                        p.text(rect.center() + vec2(0.0, 6.0), Align2::CENTER_CENTER, "Drop CBZ or ZIP comics here", FontId::proportional(20.0), text_c());
                         p.text(
                             rect.center() + vec2(0.0, 34.0),
                             Align2::CENTER_CENTER,
                             "Each comic gets its own folder. Several at once is fine.",
                             FontId::proportional(13.5),
-                            MUTED,
+                            muted(),
                         );
-                        p.text(rect.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, "or click to choose files", FontId::proportional(13.0), ROSE);
+                        p.text(rect.center() + vec2(0.0, 60.0), Align2::CENTER_CENTER, "or click to choose files", FontId::proportional(13.0), rose());
                         if resp.clicked() {
                             pick = true;
                         }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("Library: {}", self.settings.library.display())).color(MUTED).size(12.5));
+                            ui.label(RichText::new(format!("Library: {}", self.settings.library.display())).color(muted()).size(12.5));
                             if ui.small_button("📂 Open").clicked() {
                                 open_in_files(&self.settings.library);
                             }
@@ -2355,13 +2442,13 @@ impl App {
                                     match &r.state {
                                         ImportState::Running => {
                                             let frac = if r.total == 0 { 0.0 } else { r.done as f32 / r.total as f32 };
-                                            ui.add(egui::ProgressBar::new(frac).fill(ROSE).text(format!("{}/{} pages", r.done, r.total)));
+                                            ui.add(egui::ProgressBar::new(frac).fill(rose()).text(format!("{}/{} pages", r.done, r.total)));
                                         }
                                         ImportState::Done => {
-                                            ui.label(RichText::new(format!("✔ {} pages", r.total)).color(Color32::from_rgb(0x16, 0xa3, 0x4a)));
+                                            ui.label(RichText::new(format!("✔ {} pages", r.total)).color(ok_text()));
                                         }
                                         ImportState::Failed(e) => {
-                                            ui.label(RichText::new(format!("✖ {e}")).color(ROSE));
+                                            ui.label(RichText::new(format!("✖ {e}")).color(rose()));
                                         }
                                     }
                                 });
@@ -2371,16 +2458,16 @@ impl App {
                         ui.add_space(14.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Your comics").size(18.0).strong());
-                            ui.label(RichText::new(self.library.len().to_string()).color(MUTED));
+                            ui.label(RichText::new(self.library.len().to_string()).color(muted()));
                         });
                         ui.add_space(4.0);
                         if self.library.is_empty() {
-                            ui.label(RichText::new("Nothing here yet. Drop a comic above to start.").color(MUTED));
+                            ui.label(RichText::new("Nothing here yet. Drop a comic above to start.").color(muted()));
                         }
                         for e in &self.library {
                             egui::Frame::new()
-                                .fill(Color32::WHITE)
-                                .stroke(Stroke::new(1.0_f32, BORDER))
+                                .fill(surface())
+                                .stroke(Stroke::new(1.0_f32, border()))
                                 .corner_radius(CornerRadius::same(12))
                                 .inner_margin(egui::Margin::symmetric(14, 10))
                                 .show(ui, |ui| {
@@ -2394,7 +2481,7 @@ impl App {
                                             } else {
                                                 format!("{} pages · changed {}", e.pages, ago(e.modified))
                                             };
-                                            ui.label(RichText::new(sub).color(MUTED).size(12.5));
+                                            ui.label(RichText::new(sub).color(muted()).size(12.5));
                                         });
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if ui.small_button("🗑").on_hover_text("Delete this comic's folder").clicked() {
@@ -2427,6 +2514,33 @@ impl App {
     }
 
     fn windows(&mut self, ctx: &egui::Context) {
+        if let Some(problem) = self.run_problem.clone() {
+            let mut keep = true;
+            egui::Window::new("Run needs something")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(520.0)
+                .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.add(egui::Label::new(RichText::new(&problem).size(14.0)).selectable(true));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(rose_button("OK")).clicked() {
+                            keep = false;
+                        }
+                        if ui.button("Copy text").clicked() {
+                            ui.ctx().copy_text(problem.clone());
+                        }
+                        if ui.button("Open the Translate tab").clicked() {
+                            self.tab = Tab::Translate;
+                            keep = false;
+                        }
+                    });
+                });
+            if !keep {
+                self.run_problem = None;
+            }
+        }
         if let Some(dir) = self.confirm_delete.clone() {
             let name = dir
                 .file_name()
@@ -2465,7 +2579,7 @@ impl App {
                 .show(ctx, |ui| {
                     section(ui, "📚", "Library", None);
                     ui.label(
-                        RichText::new(self.settings.library.display().to_string()).color(MUTED),
+                        RichText::new(self.settings.library.display().to_string()).color(muted()),
                     );
                     ui.horizontal(|ui| {
                         if ui.button("Change folder…").clicked() {
@@ -2475,7 +2589,13 @@ impl App {
                             open_in_files(&self.settings.library);
                         }
                     });
-                    section(ui, "💻", "This laptop", None);
+                    section(ui, "🌙", "Appearance", None);
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.settings.theme, "light".to_owned(), "Light");
+                    ui.radio_value(&mut self.settings.theme, "dark".to_owned(), "Dark");
+                    ui.radio_value(&mut self.settings.theme, "system".to_owned(), "Same as system");
+                });
+                section(ui, "💻", "This laptop", None);
                     ui.label(format!(
                         "{} cores · {:.0} GB memory",
                         self.machine.cores, self.machine.memory_gb
@@ -2518,7 +2638,7 @@ impl App {
                         });
                     ui.label(
                         RichText::new("Worker changes apply after a restart.")
-                            .color(MUTED)
+                            .color(muted())
                             .size(12.0),
                     );
                     section(ui, "T", "Default font for new boxes", None);
@@ -2590,24 +2710,24 @@ impl App {
             painter.rect_filled(
                 screen,
                 0.0,
-                Color32::from_rgba_unmultiplied(0xf4, 0x3f, 0x5e, 40),
+                rose_a(40),
             );
             let card = Rect::from_center_size(screen.center(), vec2(460.0, 130.0));
-            painter.rect_filled(card, 18.0, Color32::WHITE);
-            painter.rect_stroke(card, 18.0, Stroke::new(2.0_f32, ROSE), StrokeKind::Inside);
+            painter.rect_filled(card, 18.0, surface());
+            painter.rect_stroke(card, 18.0, Stroke::new(2.0_f32, rose()), StrokeKind::Inside);
             painter.text(
                 card.center() - vec2(0.0, 18.0),
                 Align2::CENTER_CENTER,
                 format!("Drop {hovering} file(s) to import"),
                 FontId::proportional(20.0),
-                TEXT,
+                text_c(),
             );
             painter.text(
                 card.center() + vec2(0.0, 16.0),
                 Align2::CENTER_CENTER,
                 "Comics get their own folders · pictures join the open comic",
                 FontId::proportional(13.0),
-                MUTED,
+                muted(),
             );
         }
         // Toasts.
@@ -2621,19 +2741,19 @@ impl App {
                     for (text, err, _) in &self.toasts {
                         egui::Frame::new()
                             .fill(if *err {
-                                Color32::from_rgb(0xfe, 0xf2, 0xf2)
+                                err_bg()
                             } else {
-                                Color32::WHITE
+                                surface()
                             })
-                            .stroke(Stroke::new(1.0_f32, if *err { ROSE } else { BORDER }))
+                            .stroke(Stroke::new(1.0_f32, if *err { rose() } else { border() }))
                             .corner_radius(CornerRadius::same(10))
                             .inner_margin(egui::Margin::symmetric(12, 8))
                             .show(ui, |ui| {
                                 ui.set_max_width(380.0);
                                 ui.label(RichText::new(text).color(if *err {
-                                    Color32::from_rgb(0xb9, 0x1c, 0x1c)
+                                    err_text()
                                 } else {
-                                    TEXT
+                                    text_c()
                                 }));
                             });
                     }
@@ -2676,6 +2796,18 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let want_dark = match self.settings.theme.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => ctx.system_theme() == Some(egui::Theme::Dark),
+        };
+        if self.applied_dark != Some(want_dark) {
+            self.applied_dark = Some(want_dark);
+            apply_theme(ctx, want_dark);
+            if let Some(o) = &mut self.open {
+                o.block_tex.clear();
+            }
+        }
         self.screenshot_step(ctx);
         self.poll(ctx);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -2730,7 +2862,7 @@ impl eframe::App for App {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         // Gaps between panels read as light dividers.
-        egui::Rgba::from(BORDER).to_array()
+        egui::Rgba::from(border()).to_array()
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

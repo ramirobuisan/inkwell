@@ -22,6 +22,8 @@ pub struct Settings {
     pub page_cache: usize,
     pub autosave_ms: u64,
     pub default_font: String,
+    /// "system", "light" or "dark".
+    pub theme: String,
 }
 
 /// What this computer has: cores and memory.
@@ -70,6 +72,7 @@ impl Default for Settings {
             page_cache: if big { 6 } else { 4 },
             autosave_ms: 500,
             default_font: String::new(),
+            theme: "system".to_owned(),
         }
     }
 }

@@ -54,9 +54,59 @@ fn tesseract(path: &Path, lang: &str, psm: &str, tsv: bool) -> Result<String, St
         format!("Tesseract isn't available ({e}). Install the 'tesseract' package.")
     })?;
     if !out.status.success() && out.stdout.is_empty() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("Failed loading language") {
+            return Err(missing_language_help(lang.trim_end_matches("_vert"), false));
+        }
+        return Err(format!("Tesseract couldn't read the page: {}", err.trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Plain help when the chosen reading language (or Tesseract itself) is missing.
+pub fn missing_language_help(lang: &str, no_tesseract: bool) -> String {
+    let install = ["sudo", "pacman", "-S"].join(" ");
+    if no_tesseract {
+        return format!(
+            "Finding and reading text needs Tesseract, which isn't installed. Install it in a terminal with:\n    {install} tesseract tesseract-data-eng"
+        );
+    }
+    let name = match lang {
+        "jpn" => "Japanese",
+        "chi_sim" => "Simplified Chinese",
+        "chi_tra" => "Traditional Chinese",
+        "kor" => "Korean",
+        "eng" => "English",
+        other => other,
+    };
+    let vert = if ["jpn", "chi_sim", "chi_tra"].contains(&lang) {
+        format!(" tesseract-data-{lang}_vert")
+    } else {
+        String::new()
+    };
+    format!(
+        "Reading {name} text needs Tesseract's {name} language pack, which isn't installed, so finding and reading text was skipped.\nInstall it in a terminal with:\n    {install} tesseract-data-{lang}{vert}\nthen press Run again. (Or pick another language in the Translate tab.)"
+    )
+}
+
+/// Checks quickly that a translation server answers at all, before any page waits on it.
+pub fn server_answers(s: &Settings) -> Result<(), String> {
+    let base = s
+        .endpoint
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/chat/completions");
+    let mut req = ureq::get(&format!("{base}/models")).timeout(Duration::from_secs(4));
+    if !s.api_key.trim().is_empty() {
+        req = req.set("Authorization", &format!("Bearer {}", s.api_key.trim()));
+    }
+    match req.call() {
+        Ok(_) | Err(ureq::Error::Status(..)) => Ok(()),
+        Err(_) => Err(format!(
+            "No translation server answered at {}, so translating was skipped.\nTo translate on this laptop, install Ollama, start it and get the model:\n    ollama serve\n    ollama pull {}\nOr put an online service's address, model and API key in the Translate tab.",
+            s.endpoint, s.model
+        )),
+    }
 }
 
 /// Reads one box. Tall boxes in Japanese/Chinese are read as vertical text.
