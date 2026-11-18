@@ -376,3 +376,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod missing_pack_tests {
+    use super::*;
+
+    /// With only English installed and Japanese chosen, a run reports how to install the
+    /// Japanese pack instead of Tesseract's raw "Failed loading language" error.
+    #[test]
+    fn missing_language_pack_gives_install_help() {
+        let settings = Settings {
+            ocr_lang: "jpn".into(),
+            ..Settings::default()
+        };
+        let steps = Steps { find: true, read: true, translate: false, clean: false };
+        let job = PageJob {
+            index: 0,
+            path: std::env::temp_dir().join("inkwell-no-such-page.png"),
+            blocks: Vec::new(),
+        };
+        let run = start(egui::Context::default(), settings, vec!["eng".into()], steps, vec![job], 1, false);
+        let mut error = None;
+        while let Ok(m) = run.rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            match m {
+                Msg::Error(e) => error = Some(e),
+                Msg::Finished { .. } => break,
+                _ => {}
+            }
+        }
+        let e = error.expect("a problem is reported");
+        assert!(e.contains("tesseract-data-jpn"), "{e}");
+        assert!(!e.contains("TESSDATA_PREFIX"), "{e}");
+    }
+}
