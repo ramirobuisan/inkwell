@@ -356,7 +356,54 @@ pub fn find_text(page: &RgbaImage, lang: &str) -> Result<Vec<Block>, String> {
             ..Block::default()
         });
     }
+    if cjk {
+        blocks = merge_scraps(blocks);
+    }
     Ok(blocks)
+}
+
+/// Joins the pieces Tesseract reports for one vertical speech bubble (each column, or part
+/// of one, comes back on its own) into one box: boxes that overlap once grown by a third of
+/// a character merge, repeatedly. A merged box's text is left empty so the reading step
+/// reads the whole bubble at once, as vertical text.
+pub fn merge_scraps(mut blocks: Vec<Block>) -> Vec<Block> {
+    let mut parts: Vec<usize> = vec![1; blocks.len()];
+    loop {
+        let mut merged = false;
+        'outer: for i in 0..blocks.len() {
+            for j in i + 1..blocks.len() {
+                let (a, b) = (&blocks[i], &blocks[j]);
+                let ch = a.w.min(a.h).min(b.w.min(b.h));
+                let g = ch / 3.0 + 4.0;
+                let apart = a.x - g > b.x + b.w || b.x - g > a.x + a.w || a.y - g > b.y + b.h || b.y - g > a.y + a.h;
+                if apart {
+                    continue;
+                }
+                let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+                let (x1, y1) = ((a.x + a.w).max(b.x + b.w), (a.y + a.h).max(b.y + b.h));
+                // Right column first, then top to bottom.
+                let (first, second) = if a.x + a.w / 2.0 >= b.x + b.w / 2.0 { (a, b) } else { (b, a) };
+                let source = format!("{}{}", first.source, second.source);
+                let b2 = Block { x: x0, y: y0, w: x1 - x0, h: y1 - y0, source, ..Block::default() };
+                let count = parts[i] + parts[j];
+                blocks.remove(j);
+                parts.remove(j);
+                blocks[i] = b2;
+                parts[i] = count;
+                merged = true;
+                break 'outer;
+            }
+        }
+        if !merged {
+            break;
+        }
+    }
+    for (b, n) in blocks.iter_mut().zip(&parts) {
+        if *n > 1 {
+            b.source.clear();
+        }
+    }
+    blocks
 }
 
 /// The bubble's own colour: the median colour along the inside edge of the box.
@@ -589,6 +636,18 @@ mod tests {
         assert!(has_model(&m, "gemma3:4b"));
         assert!(!has_model(&m, "qwen3:4b"));
         assert!(missing_model_help("qwen3:4b").contains("ollama pull qwen3:4b"));
+    }
+
+    #[test]
+    fn scraps_of_one_bubble_merge() {
+        let piece = |x: f32, y: f32, t: &str| Block { x, y, w: 40.0, h: 60.0, source: t.into(), ..Block::default() };
+        // Two columns of one bubble (right one first) and a bubble far away.
+        let out = merge_scraps(vec![piece(100.0, 100.0, "B"), piece(150.0, 100.0, "A"), piece(150.0, 170.0, "A2"), piece(600.0, 600.0, "C")]);
+        assert_eq!(out.len(), 2, "{:?}", out.iter().map(|b| (b.x, b.y, b.w, b.h)).collect::<Vec<_>>());
+        let big = out.iter().find(|b| b.x == 100.0).unwrap();
+        assert_eq!((big.w, big.h), (90.0, 130.0));
+        assert!(big.source.is_empty(), "merged boxes are read again");
+        assert_eq!(out.iter().find(|b| b.x == 600.0).unwrap().source, "C");
     }
 
     #[test]
