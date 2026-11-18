@@ -1,0 +1,7 @@
+# Copy to .cargo/config.toml and fill in the paths for your machine.
+[env]
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
+# libclang for the vendored -sys crates (bindgen); not needed when the system clang is found.
+# LIBCLANG_PATH = "/path/to/libclang/lib"
+# Extra clang arguments, e.g. clang built-in headers and the GCC install folder:
+# BINDGEN_EXTRA_CLANG_ARGS = "-isystem /path/to/clang/include --gcc-install-dir=/usr/lib/gcc/<triple>/<version>"
