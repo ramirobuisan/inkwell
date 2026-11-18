@@ -414,6 +414,16 @@ pub fn translate(
     texts: &[String],
     history: &[(String, String)],
 ) -> Result<(Vec<String>, (String, String)), String> {
+    if let Some(root) = ollama_root(&s.endpoint) {
+        let first = translate_ollama(s, &root, texts, history)?;
+        // An answer that only hands the texts back is asked again without the earlier
+        // pages, as the original asks again when a model echoes (translate/mod.rs).
+        let echoed = first.0.iter().zip(texts).all(|(a, b)| a.trim() == b.trim());
+        if echoed && !history.is_empty() {
+            return translate_ollama(s, &root, texts, &[]);
+        }
+        return Ok(first);
+    }
     let mut obj = Map::new();
     for (i, t) in texts.iter().enumerate() {
         obj.insert((i + 1).to_string(), Value::String(t.clone()));
@@ -472,6 +482,78 @@ pub fn translate(
         })
         .collect();
     Ok((out, (request, content.to_owned())))
+}
+
+/// Translates through a local Ollama with its own chat API: no thinking (a thinking model
+/// on a laptop's processor spends minutes reasoning before it answers), and the answer held
+/// to `{"translations": [...]}` in order (a model asked to keep a JSON object's keys tends
+/// to hand the original values back).
+fn translate_ollama(
+    s: &Settings,
+    root: &str,
+    texts: &[String],
+    history: &[(String, String)],
+) -> Result<(Vec<String>, (String, String)), String> {
+    let numbered = |t: &[String]| {
+        t.iter()
+            .enumerate()
+            .map(|(i, x)| format!("{}. {}", i + 1, x.replace('\n', " ")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let request = format!(
+        "Translate each numbered text into {} and answer with {{\"translations\": [...]}} in the same order.\n{}",
+        s.target_lang,
+        numbered(texts)
+    );
+    let mut system = format!("You translate manga dialogue into natural {}. Keep each text short enough for its speech bubble.", s.target_lang);
+    if !s.instructions.trim().is_empty() {
+        system = format!("{system}\n\n{}", s.instructions.trim());
+    }
+    let mut messages = vec![json!({"role": "system", "content": system})];
+    for (q, a) in history {
+        messages.push(json!({"role": "user", "content": q}));
+        messages.push(json!({"role": "assistant", "content": a}));
+    }
+    messages.push(json!({"role": "user", "content": request}));
+    let n = texts.len();
+    let body = json!({
+        "model": s.model,
+        "messages": messages,
+        "stream": false,
+        "think": false,
+        "format": {
+            "type": "object",
+            "properties": {"translations": {"type": "array", "items": {"type": "string"}, "minItems": n, "maxItems": n}},
+            "required": ["translations"]
+        },
+        "options": {"num_predict": 120 * n + 200},
+    });
+    let resp: Value = ureq::post(&format!("{root}/api/chat"))
+        .timeout(Duration::from_secs(30 * 60))
+        .send_json(body)
+        .map_err(|e| match e {
+            ureq::Error::Status(code, r) => {
+                let body = r.into_string().unwrap_or_default();
+                if code == 404 && body.contains("not found") {
+                    missing_model_help(&s.model)
+                } else {
+                    format!("The translation server answered {code}: {body}")
+                }
+            }
+            other => format!("The translation server stopped answering ({other})."),
+        })?
+        .into_json()
+        .map_err(|e| format!("The translation server's answer isn't JSON: {e}"))?;
+    let content = resp["message"]["content"].as_str().unwrap_or("").to_owned();
+    let parsed: Value = serde_json::from_str(content.trim())
+        .or_else(|_| parse_reply(&content).map(Value::Object).ok_or(()))
+        .map_err(|_| format!("The model didn't answer with a list: {}", content.chars().take(200).collect::<String>()))?;
+    let list = parsed["translations"].as_array().cloned().unwrap_or_default();
+    let out = (0..n)
+        .map(|i| list.get(i).and_then(|v| v.as_str()).unwrap_or("").to_owned())
+        .collect();
+    Ok((out, (request, content)))
 }
 
 /// The JSON object in a reply, skipping thinking tags and code fences.

@@ -2002,6 +2002,7 @@ dependencies = [
  "eframe",
  "hayro",
  "image",
+ "libc",
  "rars",
  "rfd",
  "serde",

@@ -81,3 +81,55 @@ pub fn install_panic_hook() {
         default(info);
     }));
 }
+
+
+static CRASH_PATH: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+
+extern "C" fn on_fatal_signal(sig: libc::c_int) {
+    // Only async-signal-safe calls here: open, write, close, signal, raise.
+    let msg: &[u8] = match sig {
+        libc::SIGSEGV => b"Stopped by the system: invalid memory access (SIGSEGV).\n",
+        libc::SIGBUS => b"Stopped by the system: the program's file changed or vanished while it ran (SIGBUS).\n",
+        libc::SIGABRT => b"Stopped: a library aborted the program (SIGABRT).\n",
+        libc::SIGILL => b"Stopped: illegal instruction (SIGILL).\n",
+        libc::SIGFPE => b"Stopped: arithmetic fault (SIGFPE).\n",
+        _ => b"Stopped by a signal.\n",
+    };
+    if let Some(path) = CRASH_PATH.get() {
+        unsafe {
+            let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644);
+            if fd >= 0 {
+                libc::write(fd, msg.as_ptr().cast(), msg.len());
+                libc::close(fd);
+            }
+        }
+    }
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// Leaves a crash note when the program is stopped by a fatal signal rather than a
+/// panic (a graphics driver fault, the program's file replaced while running…).
+pub fn install_signal_note() {
+    let _ = fs::create_dir_all(data_dir());
+    let path = data_dir().join("crash.log");
+    if let Ok(c) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
+        let _ = CRASH_PATH.set(c);
+    }
+    for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT, libc::SIGILL, libc::SIGFPE] {
+        unsafe {
+            libc::signal(sig, on_fatal_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        }
+    }
+}
+
+/// The note the last crash left, if any (and clears it).
+pub fn take_crash_note() -> Option<String> {
+    let path = data_dir().join("crash.log");
+    let note = fs::read_to_string(&path).ok()?;
+    let _ = fs::remove_file(&path);
+    let first = note.lines().next().unwrap_or("").trim().to_owned();
+    (!first.is_empty()).then_some(first)
+}

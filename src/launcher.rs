@@ -62,8 +62,38 @@ fn entry(exe: &str, icon: &str) -> String {
 
 /// Writes (or refreshes) the app-menu entry for the running program. Returns the entry's
 /// path, or `None` when it was already current.
+/// Where the app-menu entry's copy of the program lives. Running a copy, not the program
+/// in the build folder, means a rebuild can't pull the program out from under an open
+/// window (which ends it at once, with no chance to save a crash note).
+fn installed_program() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("inkwell/bin/inkwell"))
+}
+
+/// Copies the running program to `installed_program()` when it differs (size or time),
+/// through a temporary file renamed into place, so a copy that is running keeps going.
+fn install_copy(exe: &std::path::Path) -> io::Result<PathBuf> {
+    let Some(dest) = installed_program() else { return Ok(exe.to_owned()) };
+    if exe == dest {
+        return Ok(dest);
+    }
+    let same = match (fs::metadata(exe), fs::metadata(&dest)) {
+        (Ok(a), Ok(b)) => a.len() == b.len() && a.modified().ok() <= b.modified().ok(),
+        _ => false,
+    };
+    if !same {
+        if let Some(dir) = dest.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let tmp = crate::project::with_suffix(&dest, ".new");
+        fs::copy(exe, &tmp)?;
+        fs::rename(&tmp, &dest)?;
+    }
+    Ok(dest)
+}
+
 pub fn install(force: bool) -> io::Result<Option<PathBuf>> {
     let exe = std::env::current_exe()?;
+    let exe = install_copy(&exe)?;
     let exe = exe.to_string_lossy().replace('"', "\\\"");
     let (Some(apps), Some(icon)) = (applications_dir(), icon_path()) else {
         return Err(io::Error::new(io::ErrorKind::NotFound, "no home folder"));

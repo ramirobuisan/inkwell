@@ -667,6 +667,7 @@ impl App {
             run_problem: None,
         };
         let mut notes = Vec::new();
+        let crash_note = if app.screenshot.is_some() { None } else { session::take_crash_note() };
         if crashed {
             if let Some(dir) = app.session.last_project.clone().filter(|d| d.exists()) {
                 let page = app.session.page;
@@ -675,6 +676,9 @@ impl App {
                     "Inkwell closed unexpectedly last time. Your work was restored and page {} reopened.",
                     page + 1
                 ));
+                if let Some(n) = &crash_note {
+                    notes.push(format!("({n})"));
+                }
             } else {
                 notes.push("Inkwell closed unexpectedly last time. Nothing was lost.".into());
             }
