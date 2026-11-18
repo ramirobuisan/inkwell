@@ -101,6 +101,7 @@ enum Tool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Properties,
+    Story,
     Translate,
 }
 
@@ -294,6 +295,7 @@ pub struct App {
     confirm_delete: Option<PathBuf>,
     settings_open: bool,
     about_open: bool,
+    history_open: bool,
     screenshot: Option<PathBuf>,
     frames: u64,
     shot_sent: bool,
@@ -370,6 +372,58 @@ fn apply_theme(ctx: &egui::Context, is_dark: bool) {
     v.widgets.active.bg_stroke = Stroke::new(1.0_f32, rose());
     v.widgets.open.weak_bg_fill = rose_soft();
     ctx.set_visuals_of(theme, v);
+}
+
+
+/// What one undo step changed, read from the boxes before and after it.
+fn describe_step(before: &[Block], after: &[Block]) -> String {
+    use std::collections::HashMap;
+    let b: HashMap<u64, &Block> = before.iter().map(|x| (x.id, x)).collect();
+    let a: HashMap<u64, &Block> = after.iter().map(|x| (x.id, x)).collect();
+    let added = after.iter().filter(|x| !b.contains_key(&x.id)).count();
+    let removed = before.iter().filter(|x| !a.contains_key(&x.id)).count();
+    if added > 1 {
+        return format!("Find text ({added} boxes)");
+    }
+    if added == 1 {
+        return "New text box".into();
+    }
+    if removed > 0 {
+        return if removed == 1 { "Delete text box".into() } else { format!("Delete {removed} boxes") };
+    }
+    let order_changed = before.iter().map(|x| x.id).ne(after.iter().map(|x| x.id));
+    if order_changed {
+        return "Renumber texts".into();
+    }
+    let mut kinds: Vec<&str> = Vec::new();
+    for x in after {
+        let Some(y) = b.get(&x.id) else { continue };
+        let k = if x.translation != y.translation {
+            "Translate"
+        } else if x.source != y.source {
+            "Edit original text"
+        } else if (x.x, x.y) != (y.x, y.y) && (x.w, x.h) == (y.w, y.h) {
+            "Move text box"
+        } else if (x.w, x.h) != (y.w, y.h) {
+            "Resize text box"
+        } else if x.visible != y.visible {
+            "Show or hide"
+        } else if x.cover != y.cover || x.cover_color != y.cover_color || x.cover_shape != y.cover_shape {
+            "Clean up"
+        } else if x != *y {
+            "Text style"
+        } else {
+            continue;
+        };
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+    }
+    match kinds.len() {
+        0 => "No change".into(),
+        1 => kinds[0].into(),
+        _ => format!("{} and more", kinds[0]),
+    }
 }
 
 fn ago(t: Option<SystemTime>) -> String {
@@ -475,6 +529,7 @@ impl App {
             confirm_delete: None,
             settings_open: false,
             about_open: false,
+            history_open: false,
             screenshot,
             frames: 0,
             shot_sent: false,
@@ -1206,6 +1261,10 @@ impl App {
                             ui.checkbox(&mut self.all_pages, "Apply to all pages");
                         });
                         ui.menu_button("View", |ui| {
+                            if ui.button("History…").clicked() {
+                                self.history_open = true;
+                                ui.close_menu();
+                            }
                             if let Some(o) = &mut self.open {
                                 if ui.button("Fit page   Ctrl+0").clicked() {
                                     o.fit = true;
@@ -1443,10 +1502,11 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let w = (ui.available_width() - 8.0) / 2.0;
+                    let w = (ui.available_width() - 16.0) / 3.0;
                     for (tab, label) in [
-                        (Tab::Properties, "☰  Properties"),
-                        (Tab::Translate, "🌐  Translate"),
+                        (Tab::Properties, "☰ Type"),
+                        (Tab::Story, "📖 Story"),
+                        (Tab::Translate, "🌐 Translate"),
                     ] {
                         let on = self.tab == tab;
                         let b = egui::Button::new(RichText::new(label).size(14.5))
@@ -1468,6 +1528,7 @@ impl App {
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.tab {
                         Tab::Properties => self.properties(ui, ctx),
+                        Tab::Story => self.story_tab(ui),
                         Tab::Translate => self.translate_tab(ui),
                     });
             });
@@ -1797,6 +1858,116 @@ impl App {
         }
     }
 
+
+    /// Every page's texts in page order, each page's in reading order, numbered as the
+    /// canvas numbers them while this tab shows (the original's Story panel, after Clip
+    /// Studio Paint EX's Story Editor). Editing a field edits its box; clicking a number
+    /// shows its page and selects the box.
+    fn story_tab(&mut self, ui: &mut egui::Ui) {
+        let Some(o) = &mut self.open else { return };
+        section(ui, "📖", "Story", None);
+        ui.label(
+            RichText::new("Every page's texts in reading order. Edit them here; the numbers match the page.")
+                .color(muted())
+                .size(12.5),
+        );
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("Renumber this page right-to-left")
+                .on_hover_text("Manga order: top rows first, right to left within a row")
+                .clicked()
+            {
+                let cur = o.data.current;
+                o.snapshot(None);
+                let blocks = &mut o.data.pages[cur].blocks;
+                let row = blocks.iter().map(|b| b.h).fold(0.0f32, f32::max).max(1.0) * 0.6;
+                blocks.sort_by(|a, b| {
+                    let (ra, rb) = ((a.y / row).floor(), (b.y / row).floor());
+                    ra.partial_cmp(&rb)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then((b.x + b.w).partial_cmp(&(a.x + a.w)).unwrap_or(std::cmp::Ordering::Equal))
+                });
+                o.changed();
+            }
+        });
+        ui.add_space(4.0);
+        let mut go: Option<(usize, u64)> = None;
+        let mut edit: Option<(usize, u64, bool, String)> = None;
+        let total: usize = o.data.pages.iter().map(|p| p.blocks.len()).sum();
+        if total == 0 {
+            ui.label(RichText::new("No texts yet. Draw boxes with the Text tool or press Run to find them.").color(muted()));
+        }
+        for (pi, page) in o.data.pages.iter().enumerate() {
+            if page.blocks.is_empty() {
+                continue;
+            }
+            ui.add_space(6.0);
+            let here = pi == o.data.current;
+            ui.label(
+                RichText::new(format!("Page {}  ·  {}", pi + 1, page.name))
+                    .strong()
+                    .color(if here { rose() } else { text_c() }),
+            );
+            for (bi, b) in page.blocks.iter().enumerate() {
+                ui.horizontal_top(|ui| {
+                    let sel = here && o.selected == Some(b.id);
+                    let badge = egui::Button::new(RichText::new(format!("{}", bi + 1)).color(on_rose()).strong())
+                        .fill(if sel { rose() } else { rose_a(160) })
+                        .corner_radius(CornerRadius::same(10))
+                        .min_size(vec2(24.0, 22.0));
+                    if ui.add(badge).on_hover_text("Show this box").clicked() {
+                        go = Some((pi, b.id));
+                    }
+                    ui.vertical(|ui| {
+                        let mut src = b.source.clone();
+                        let r1 = ui.add(
+                            egui::TextEdit::multiline(&mut src)
+                                .desired_rows(1)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("Original text")
+                                .text_color(muted()),
+                        );
+                        if r1.changed() {
+                            edit = Some((pi, b.id, false, src));
+                        }
+                        let mut tr = b.translation.clone();
+                        let r2 = ui.add(
+                            egui::TextEdit::multiline(&mut tr)
+                                .desired_rows(1)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("Translation"),
+                        );
+                        if r2.changed() {
+                            edit = Some((pi, b.id, true, tr));
+                        }
+                        if r1.gained_focus() || r2.gained_focus() {
+                            go = Some((pi, b.id));
+                        }
+                    });
+                });
+            }
+        }
+        if let Some((pi, id, translation, text)) = edit {
+            o.snapshot_page(pi, Some((id, if translation { 2 } else { 1 })));
+            if let Some(b) = o.data.pages[pi].blocks.iter_mut().find(|b| b.id == id) {
+                if translation {
+                    b.translation = text;
+                } else {
+                    b.source = text;
+                }
+            }
+            o.changed();
+        }
+        if let Some((pi, id)) = go {
+            if pi != o.data.current {
+                self.go_to(pi);
+            }
+            if let Some(o) = &mut self.open {
+                o.selected = Some(id);
+            }
+        }
+    }
+
     fn translate_tab(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.clone();
         section(ui, "🌐", "Translation server", None);
@@ -2098,6 +2269,7 @@ impl App {
     fn canvas(&mut self, ctx: &egui::Context) {
         let fonts = self.fonts.clone();
         let tool = self.tool;
+        let show_numbers = self.tab == Tab::Story;
         let cap = self.settings.texture_cap;
         let default_font = self.settings.default_font.clone();
         let mut new_tool = None;
@@ -2246,6 +2418,12 @@ impl App {
                             rose_a(90)
                         };
                         dashed_rect(&painter, r, Stroke::new(1.2_f32, col), 5.0, 4.0);
+                    }
+                    if show_numbers {
+                        let num = blocks.iter().position(|x| x.id == b.id).unwrap_or(0) + 1;
+                        let c = r.left_top() + vec2(-2.0, -2.0);
+                        painter.circle_filled(c, 11.0, rose());
+                        painter.text(c, Align2::CENTER_CENTER, num.to_string(), FontId::proportional(12.0), on_rose());
                     }
                 }
                 o.block_tex
@@ -2738,6 +2916,72 @@ impl App {
                 self.settings.save();
             }
             self.settings_open = openw;
+        }
+        if self.history_open {
+            let mut openw = true;
+            let mut jump: Option<usize> = None;
+            if let Some(o) = &self.open {
+                // Steps in order: the undo list, then what can be redone (newest redo last).
+                let mut steps: Vec<(usize, Vec<Block>)> = o.undo.clone();
+                let done = steps.len();
+                steps.extend(o.redo.iter().rev().cloned());
+                // The state each step leads to: the next step's snapshot of the same page,
+                // or the page as it is now.
+                let mut labels = Vec::with_capacity(steps.len());
+                for (k, (page, before)) in steps.iter().enumerate() {
+                    let after = steps[k + 1..]
+                        .iter()
+                        .find(|(p, _)| p == page)
+                        .map(|(_, bl)| bl.clone())
+                        .unwrap_or_else(|| o.data.pages.get(*page).map(|p| p.blocks.clone()).unwrap_or_default());
+                    let after = if k >= done {
+                        after
+                    } else {
+                        after
+                    };
+                    labels.push(format!("{}  ·  page {}", describe_step(before, &after), page + 1));
+                }
+                egui::Window::new("History")
+                    .open(&mut openw)
+                    .default_width(280.0)
+                    .default_pos(ctx.screen_rect().right_top() + vec2(-620.0, 120.0))
+                    .show(ctx, |ui| {
+                        ui.label(RichText::new("Click a step to go back to it.").color(muted()).size(12.5));
+                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                            if ui.selectable_label(done == 0, "Opened").clicked() {
+                                jump = Some(0);
+                            }
+                            for (k, l) in labels.iter().enumerate() {
+                                let text = if k < done {
+                                    RichText::new(l.clone())
+                                } else {
+                                    RichText::new(l.clone()).color(muted()).italics()
+                                };
+                                if ui.selectable_label(k + 1 == done, text).clicked() {
+                                    jump = Some(k + 1);
+                                }
+                            }
+                        });
+                        ui.label(
+                            RichText::new(format!("Keeps the last {UNDO_STEPS} steps, like the original."))
+                                .color(muted())
+                                .size(11.5),
+                        );
+                    });
+            } else {
+                egui::Window::new("History").open(&mut openw).show(ctx, |ui| {
+                    ui.label("Open a comic to see its history.");
+                });
+            }
+            if let (Some(target), Some(o)) = (jump, &mut self.open) {
+                while o.undo.len() > target {
+                    o.step(true);
+                }
+                while o.undo.len() < target && !o.redo.is_empty() {
+                    o.step(false);
+                }
+            }
+            self.history_open = openw;
         }
         if self.about_open {
             let mut openw = true;
