@@ -138,3 +138,12 @@ The original runs detection, OCR, inpainting and LLM models on the GPU. Here:
 | Right-to-left | `text/arrange.rs`: runs ordered by Unicode bidi levels | `unicode-bidi` reordering per line; Arabic letters joined with `ar-reshaper` (the original uses a full text shaper) |
 | PSD | `koharu-psd`: layered PSD, at most 30,000 px a side, editable type layers | layered PSD (artwork, Cleanup, each box's cover and text as named layers, hidden boxes hidden), same size limit; texts are pixel layers, not editable type |
 | Assistant | `koharu-agent`: get_project, get_page, get_layer, edit (one undo step), run, wait, stop, view_page; turns capped | Ask tab: get_project, get_page, show_page, edit (one undo step, applied whole or not at all); 8 model calls per message (*estimated* cap); no run/wait/stop/view_page |
+
+## Koharu's models (vendored, run as-is)
+
+| Step | Original | Rebuild |
+|---|---|---|
+| Find text | `koharu-ml` `KoharuLayoutHighres::inference` + `Detected::layout`: lettering in reading order, glyph masks, rooms in bubbles; thresholds onomatopoeia 0.4, bubble 0.4 (`ONOMATOPOEIA_THRESHOLD`, `BUBBLE_THRESHOLD`) | the same calls; a box is the lettering's bbox grown to its room in the bubble |
+| Read text | `MangaOcrAr::inference` on crops | the same, one crop per box |
+| Clean up | `Lama::inference` (IOPaint defaults: whole page up to 800 px, else crops with a 128 px margin, `WHOLE`) under the glyph mask | the same, mask = glyphs inside the boxes grown by 7 px (*estimated* margin), result kept on the cleanup layer as one undo step |
+| Translate | local GGUF through llama.cpp (Index-Translate) or hosted providers | Ollama / OpenAI-compatible servers (unchanged) |

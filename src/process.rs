@@ -452,6 +452,7 @@ mod tests {
         image::RgbaImage::from_pixel(200, 200, image::Rgba([255, 255, 255, 255])).save(&page).unwrap();
         let settings = Settings {
             ocr_lang: "xyz_missing".into(),
+            vision: "tesseract".into(),
             endpoint: "http://127.0.0.1:9/v1".into(),
             ..Settings::default()
         };
@@ -482,6 +483,7 @@ mod missing_pack_tests {
     fn missing_language_pack_gives_install_help() {
         let settings = Settings {
             ocr_lang: "jpn".into(),
+            vision: "tesseract".into(),
             ..Settings::default()
         };
         let steps = Steps { find: true, read: true, translate: false, clean: false };

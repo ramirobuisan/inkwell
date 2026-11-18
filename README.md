@@ -25,3 +25,16 @@ Light and dark mode: the sun/moon button in the top-right corner, or the Theme m
 `inkwell --export-cbz <project folder>` exports without opening the window.
 
 See `MECHANICS.md` for the rules this app follows.
+
+## Koharu's models
+
+Finding, reading and cleaning up text use Koharu's own vision models through its
+open-source crates, copied into `vendor/` from Koharu 0.85.2
+(https://github.com/koharu-rs/koharu, MIT OR Apache-2.0; licences in `vendor/`):
+Koharu Layout HighRes (finds lettering and its glyph pixels), manga-ocr-ar (reads it)
+and LaMa (repaints the artwork onto the cleanup layer). They run on libtorch from
+Koharu's store (`~/.cache/koharu/store`), which the original Koharu downloads on its
+first run. Tesseract remains as a fallback (Setup tab).
+
+Building the vendored `-sys` crates needs libclang; `.cargo/config.toml` points at a
+user-folder libclang 20 and clang's built-in headers (no system clang needed).
