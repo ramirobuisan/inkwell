@@ -89,19 +89,156 @@ pub fn missing_language_help(lang: &str, no_tesseract: bool) -> String {
     )
 }
 
-/// Checks quickly that a translation server answers at all, before any page waits on it.
-pub fn server_answers(s: &Settings) -> Result<(), String> {
-    let base = s
-        .endpoint
+/// The server's API base: the address without `/chat/completions`.
+fn api_base(endpoint: &str) -> String {
+    endpoint
         .trim()
         .trim_end_matches('/')
-        .trim_end_matches("/chat/completions");
-    let mut req = ureq::get(&format!("{base}/models")).timeout(Duration::from_secs(4));
+        .trim_end_matches("/chat/completions")
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+/// An Ollama server's own root (for downloading models), when the address is one.
+pub fn ollama_root(endpoint: &str) -> Option<String> {
+    let base = api_base(endpoint);
+    let root = base.strip_suffix("/v1")?.to_owned();
+    let probe = ureq::get(&format!("{root}/api/tags"))
+        .timeout(Duration::from_secs(3))
+        .call()
+        .ok()?;
+    probe.into_json::<Value>().ok()?.get("models")?;
+    Some(root)
+}
+
+/// The models the server offers (`GET /models`).
+pub fn list_models(s: &Settings) -> Result<Vec<String>, String> {
+    let mut req = ureq::get(&format!("{}/models", api_base(&s.endpoint))).timeout(Duration::from_secs(5));
     if !s.api_key.trim().is_empty() {
         req = req.set("Authorization", &format!("Bearer {}", s.api_key.trim()));
     }
-    match req.call() {
-        Ok(_) | Err(ureq::Error::Status(..)) => Ok(()),
+    let v: Value = req
+        .call()
+        .map_err(|e| format!("Can't reach the translation server at {} ({e}).", s.endpoint))?
+        .into_json()
+        .map_err(|e| format!("The server's model list isn't JSON: {e}"))?;
+    let mut names: Vec<String> = v["data"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|m| m["id"].as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    names.sort();
+    Ok(names)
+}
+
+/// Whether `model` is among `models` (Ollama adds `:latest` to names without a tag).
+pub fn has_model(models: &[String], model: &str) -> bool {
+    let m = model.trim();
+    models.iter().any(|x| x == m || (!m.contains(':') && *x == format!("{m}:latest")))
+}
+
+pub fn missing_model_help(model: &str) -> String {
+    format!(
+        "The model '{model}' isn't on the translation server yet, so translating was skipped.\nIn the Translate tab, press \u{201c}Download {model}\u{201d}, or pick one of the server's models.\n(In a terminal: ollama pull {model})"
+    )
+}
+
+/// Downloads a model into an Ollama server, reporting (status, fraction done or -1).
+pub fn pull_model(root: &str, model: &str, progress: impl Fn(String, f32)) -> Result<(), String> {
+    let resp = ureq::post(&format!("{root}/api/pull"))
+        .timeout(Duration::from_secs(6 * 3600))
+        .send_json(json!({"model": model, "stream": true}))
+        .map_err(|e| match e {
+            ureq::Error::Status(code, r) => format!(
+                "The server refused the download ({code}): {}",
+                r.into_string().unwrap_or_default()
+            ),
+            other => format!("Can't reach the translation server ({other})."),
+        })?;
+    let reader = std::io::BufReader::new(resp.into_reader());
+    for line in std::io::BufRead::lines(reader) {
+        let line = line.map_err(|e| format!("The download stopped: {e}"))?;
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if let Some(err) = v["error"].as_str() {
+            return Err(format!("The download failed: {err}"));
+        }
+        let status = v["status"].as_str().unwrap_or("").to_owned();
+        let frac = match (v["completed"].as_f64(), v["total"].as_f64()) {
+            (Some(c), Some(t)) if t > 0.0 => (c / t) as f32,
+            _ => -1.0,
+        };
+        progress(status.clone(), frac);
+        if status == "success" {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn is_local(endpoint: &str) -> bool {
+    let e = endpoint.to_ascii_lowercase();
+    e.contains("://localhost") || e.contains("://127.0.0.1") || e.contains("://[::1]")
+}
+
+/// Gets the translation server ready the way the original gets its models ready on first
+/// use (koharu-runtime downloads each model the first time it is needed): a local Ollama
+/// that isn't running is started, and a model it doesn't have is downloaded, with
+/// `progress(label, fraction or -1)` along the way.
+pub fn prepare_server(s: &Settings, progress: impl Fn(String, f32)) -> Result<(), String> {
+    let mut models = list_models(s);
+    if models.is_err() && is_local(&s.endpoint) {
+        let started = std::process::Command::new("ollama")
+            .arg("serve")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if started.is_ok() {
+            progress("Starting the translation server…".into(), -1.0);
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(500));
+                models = list_models(s);
+                if models.is_ok() {
+                    break;
+                }
+            }
+        }
+    }
+    let models = match models {
+        Ok(m) => m,
+        Err(_) => return server_answers(s),
+    };
+    if has_model(&models, &s.model) {
+        return Ok(());
+    }
+    match ollama_root(&s.endpoint) {
+        Some(root) => {
+            let model = s.model.trim().to_owned();
+            pull_model(&root, &model, |status, frac| {
+                let label = if frac >= 0.0 {
+                    format!("Downloading {model} (first use) {:.0}%", frac * 100.0)
+                } else {
+                    format!("Downloading {model} (first use): {status}")
+                };
+                progress(label, frac);
+            })
+        }
+        None if models.is_empty() => Ok(()),
+        None => Err(missing_model_help(&s.model)),
+    }
+}
+
+/// Checks that a translation server answers and has the chosen model, before any page
+/// waits on it.
+pub fn server_answers(s: &Settings) -> Result<(), String> {
+    match list_models(s) {
+        Ok(models) => {
+            // Online services may not list every model; judge only a list that has some,
+            // or a local Ollama server, which lists everything it has.
+            if (!models.is_empty() || ollama_root(&s.endpoint).is_some()) && !has_model(&models, &s.model) {
+                return Err(missing_model_help(&s.model));
+            }
+            Ok(())
+        }
         Err(_) => Err(format!(
             "No translation server answered at {}, so translating was skipped.\nTo translate on this laptop, install Ollama, start it and get the model:\n    ollama serve\n    ollama pull {}\nOr put an online service's address, model and API key in the Translate tab.",
             s.endpoint, s.model
@@ -303,7 +440,12 @@ pub fn translate(
         .send_json(body)
         .map_err(|e| match e {
             ureq::Error::Status(code, r) => {
-                format!("The translation server answered {code}: {}", r.into_string().unwrap_or_default())
+                let body = r.into_string().unwrap_or_default();
+                if code == 404 && body.contains("not found") {
+                    missing_model_help(&s.model)
+                } else {
+                    format!("The translation server answered {code}: {body}")
+                }
             }
             other => format!(
                 "Can't reach the translation server at {} ({other}). Start Ollama or check Settings.",
@@ -356,6 +498,15 @@ mod tests {
         let r = parse_reply("<think>hmm {\"x\":1}</think>\n```json\n{\"1\": \"Hello\", \"2\": \"Bye\"}\n```").unwrap();
         assert_eq!(r["1"], "Hello");
         assert_eq!(r["2"], "Bye");
+    }
+
+    #[test]
+    fn model_names_match_with_or_without_latest() {
+        let m = vec!["gemma3:4b".to_owned(), "qwen3:latest".to_owned()];
+        assert!(has_model(&m, "qwen3"));
+        assert!(has_model(&m, "gemma3:4b"));
+        assert!(!has_model(&m, "qwen3:4b"));
+        assert!(missing_model_help("qwen3:4b").contains("ollama pull qwen3:4b"));
     }
 
     #[test]

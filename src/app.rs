@@ -301,6 +301,8 @@ pub struct App {
     folder_picker: Option<Receiver<PathBuf>>,
     open_after_import: bool,
     applied_dark: Option<bool>,
+    server_models: Option<Result<Vec<String>, String>>,
+    models_rx: Option<Receiver<Result<Vec<String>, String>>>,
     run_problem: Option<String>,
 }
 
@@ -480,6 +482,8 @@ impl App {
             folder_picker: None,
             open_after_import: false,
             applied_dark: None,
+            server_models: None,
+            models_rx: None,
             run_problem: None,
         };
         let mut notes = Vec::new();
@@ -820,6 +824,7 @@ impl App {
         }
         if let Some((cancelled, summary)) = finished {
             self.running = None;
+            self.server_models = None;
             self.touched.clear();
             if let Some(o) = &mut self.open {
                 o.save();
@@ -855,6 +860,13 @@ impl App {
             None => {}
         }
 
+        if let Some(rx) = &self.models_rx {
+            if let Ok(list) = rx.try_recv() {
+                self.models_rx = None;
+                self.server_models = Some(list);
+            }
+        }
+
         // File dialogs (run on their own threads so the window keeps drawing).
         if let Some(rx) = &self.picker {
             if let Ok(paths) = rx.try_recv() {
@@ -879,6 +891,16 @@ impl App {
             self.importer.resume_interrupted();
         }
         self.library = project::list_library(&self.settings.library);
+    }
+
+    fn refresh_models(&mut self) {
+        let (tx, rx) = channel();
+        let settings = self.settings.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::ai::list_models(&settings));
+        });
+        self.server_models = None;
+        self.models_rx = Some(rx);
     }
 
     fn pick_comics(&mut self) {
@@ -1785,6 +1807,51 @@ impl App {
         );
         caps(ui, "MODEL");
         ui.add(egui::TextEdit::singleline(&mut self.settings.model).desired_width(f32::INFINITY));
+        if self.server_models.is_none() && self.models_rx.is_none() {
+            self.refresh_models();
+        }
+        ui.horizontal_wrapped(|ui| {
+            match &self.server_models {
+                None => {
+                    ui.label(RichText::new("Asking the server for its models…").color(muted()).size(12.5));
+                }
+                Some(Err(_)) => {
+                    ui.label(
+                        RichText::new("The server isn't running; Run starts a local Ollama by itself.")
+                            .color(muted())
+                            .size(12.5),
+                    );
+                }
+                Some(Ok(list)) if list.is_empty() => {
+                    ui.label(
+                        RichText::new(format!(
+                            "No models on the server yet; Run downloads “{}” the first time.",
+                            self.settings.model
+                        ))
+                        .color(muted())
+                        .size(12.5),
+                    );
+                }
+                Some(Ok(list)) => {
+                    let have = crate::ai::has_model(list, &self.settings.model);
+                    let list = list.clone();
+                    egui::ComboBox::from_id_salt("server_models")
+                        .selected_text(if have { "On the server ✔" } else { "Pick a server model" })
+                        .width(170.0)
+                        .show_ui(ui, |ui| {
+                            for m in &list {
+                                ui.selectable_value(&mut self.settings.model, m.clone(), m);
+                            }
+                        });
+                    if !have {
+                        ui.label(RichText::new("Run downloads it the first time.").color(muted()).size(12.5));
+                    }
+                }
+            }
+            if ui.small_button("↻").on_hover_text("Ask the server again").clicked() {
+                self.refresh_models();
+            }
+        });
         caps(ui, "API KEY (ONLINE SERVICES ONLY)");
         ui.add(
             egui::TextEdit::singleline(&mut self.settings.api_key)

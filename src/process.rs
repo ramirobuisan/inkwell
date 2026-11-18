@@ -270,7 +270,10 @@ pub fn start(
                 if steps.translate && !todo.is_empty() {
                     if !server_checked {
                         server_checked = true;
-                        if let Err(e) = ai::server_answers(&settings) {
+                        let prepared = ai::prepare_server(&settings, |label, _| {
+                            send(Msg::Progress { done: n, total, label })
+                        });
+                        if let Err(e) = prepared {
                             problems.push(e);
                             steps.translate = false;
                             continue;
