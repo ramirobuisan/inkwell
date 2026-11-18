@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "values": [
+    {"name": "page image extensions", "group": "import", "value": "png, jpg, jpeg, webp", "source": "crates/koharu-desktop/src/commands/import.rs EXTENSIONS / raster()"},
+    {"name": "archive extensions", "group": "import", "value": "zip, cbz", "source": "crates/koharu-desktop/src/commands/import.rs EXTENSIONS (rar, cbr, pdf left out)"},
+    {"name": "skipped archive members", "group": "import", "value": "__MACOSX/, ._*, .DS_Store, Thumbs.db, desktop.ini", "source": "crates/koharu-desktop/src/commands/import.rs METADATA"},
+    {"name": "page order", "group": "import", "value": "name order, numbers by value", "source": "crates/koharu-desktop/src/commands/import.rs in_name_order()"},
+    {"name": "one folder per dropped comic", "group": "import", "value": true, "source": "person's request"},
+    {"name": "duplicate folder suffix", "group": "import", "value": " (2), (3)...", "estimated": true},
+    {"name": "projects list order", "group": "library", "value": "last changed first, then name", "source": "crates/koharu-desktop/src/library.rs Library::list"},
+    {"name": "autosave delay after an edit", "group": "crash safety", "value": 500, "unit": "ms", "estimated": true},
+    {"name": "atomic save with backup", "group": "crash safety", "value": true, "source": "crates/koharu-scene/tests/edits.rs (WAL journal survives a crash)"},
+    {"name": "resume interrupted import", "group": "crash safety", "value": true, "source": "person's request"},
+    {"name": "undo steps kept", "group": "editing", "value": 100, "estimated": true},
+    {"name": "translation prompt format", "group": "translation", "value": "JSON object numbered in reading order, values only", "source": "crates/koharu-pipeline/src/stages/translate/mod.rs system()"},
+    {"name": "context pages for translation", "group": "translation", "value": 2, "estimated": true},
+    {"name": "translation temperature", "group": "translation", "value": 0.2, "estimated": true},
+    {"name": "default translation endpoint", "group": "translation", "value": "http://localhost:11434/v1", "estimated": true},
+    {"name": "export page number padding", "group": "export", "value": "max(3, digits of page count)", "source": "crates/koharu-desktop/src/commands/export.rs write()"},
+    {"name": "CBZ compression", "group": "export", "value": "stored", "source": "crates/koharu-desktop/src/commands/export.rs write()"},
+    {"name": "auto text size range", "group": "text", "value": "6 to min(box height, 160)", "unit": "px", "estimated": true},
+    {"name": "line height", "group": "text", "value": 1.15, "unit": "x font height", "estimated": true},
+    {"name": "primary colour", "group": "look", "value": "#f43f5e", "source": "packages/ui/src/styles --primary rose-500"},
+    {"name": "accent colour", "group": "look", "value": "#ffe4e6", "source": "packages/ui/src/styles --accent rose-100"},
+    {"name": "image worker threads", "group": "laptop", "value": "cores / 2, min 2 (4 on M2)", "estimated": true},
+    {"name": "max displayed page side", "group": "laptop", "value": 4096, "unit": "px", "estimated": true},
+    {"name": "pages kept in graphics memory", "group": "laptop", "value": 6, "estimated": true},
+    {"name": "thumbnail size", "group": "laptop", "value": 160, "unit": "px", "estimated": true},
+    {"name": "cleanup fill", "group": "cleanup", "value": "median colour along box edge", "estimated": true}
+  ]
+}
