@@ -39,7 +39,8 @@ const TEXT: Color32 = Color32::from_rgb(0x25, 0x25, 0x25);
 const MUTED: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
 const CANVAS: Color32 = Color32::from_rgb(0xf4, 0xf4, 0xf5);
 const ROW_H: f32 = 84.0;
-const UNDO_STEPS: usize = 100;
+/// History steps kept before the oldest is dropped: koharu-scene session.rs:18 (`STEPS`).
+const UNDO_STEPS: usize = 20;
 
 const PAGE_TEX: egui::TextureOptions = egui::TextureOptions {
     magnification: egui::TextureFilter::Linear,

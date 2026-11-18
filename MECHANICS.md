@@ -1,7 +1,11 @@
 # Mechanics sheet
 
-The target (`koharu-0.85.2.zip`) is a **source archive**, not a compiled program, so every
-value below was read from the original's own source files rather than from decompiled code.
+The target (`koharu-0.85.2.zip`) is a **source archive**, not a compiled program. It was
+opened with `core_target_open` (target `t_b7404cce40fa`); the native tools refuse it ("A ZIP
+archive is not native machine code") and the archive holds no executable at all, only Rust
+and TypeScript sources, fonts and icons. So there are no function addresses: every value
+below cites the original's **source file and line** instead, which is more exact than
+decompiled code.
 "Source" names the file inside the archive. Values marked *estimated* were looked for and
 not found (or belong to parts the original does with GPU models this rebuild replaces).
 
@@ -44,7 +48,7 @@ the main file plus its `-wal` journal. The rebuild matches "every edit is kept" 
 
 ## Undo (crates/koharu-desktop/README.md §2)
 
-- An edit is one undo step. Rebuild keeps **100** steps (*estimated*).
+- An edit is one undo step; history keeps **20** steps, dropping the oldest (koharu-scene `session.rs:18`, `STEPS = 20`).
 
 ## Translation (crates/koharu-pipeline/src/stages/translate/mod.rs)
 
@@ -54,7 +58,7 @@ the main file plus its `-wal` journal. The rebuild matches "every edit is kept" 
 | User instructions | appended after the template on a blank line | `system()` |
 | Page image long side sent to vision models | 1280 px | `SIGHT` (rebuild sends text only) |
 | Earlier pages as context | conversation with summaries | conversation.rs; rebuild keeps the last **2** pages (*estimated*) |
-| Temperature | 0.2 (*estimated*; not set in the original's translate stage) | — |
+| Temperature | **not sent**: the translate stage sets none, so the model's default applies (llama.cpp path: 1.0) | `stages/translate/mod.rs` (no sampling set), koharu-llm `local/engine.rs:786` (`unwrap_or(1.0)`) |
 
 ## Export (crates/koharu-desktop/src/commands/export.rs)
 
@@ -66,10 +70,17 @@ the main file plus its `-wal` journal. The rebuild matches "every edit is kept" 
 
 ## Text fitting (crates/koharu-renderer/src/text/fit.rs)
 
-- Auto size grows/shrinks text to the largest size whose whole words fit the box; a word is
-  only split when it cannot fit at the smallest size. Rebuild: binary search from 6 px up to
-  min(box height, 160 px) (*estimated bounds*; original ceiling 256× scale `CEILING`).
-- Line height 1.15 × font height (*estimated*).
+| Rule | Value | Source |
+|---|---|---|
+| Line height | **1.2** × font height | koharu-renderer `text/style.rs:73` (`line_height.unwrap_or(1.2)`) |
+| A set size that overflows | shrinks, whole words only, to the largest scale that fits, **no smaller than 0.5** of the set size | `text/fit.rs:64-75` (`floor = 0.5`, `largest_fit`) |
+| Still overflowing at that floor | a balloon's margin narrows to **half**, then words break | `text/fit.rs:79-90` (`inset / 2.0`) |
+| Balloon margin | **1 em** (one letter width) of air from the outline | koharu-scene `values.rs:296` (`Frame::DEFAULT_INSET = 1.0`) |
+| Auto (best-fit) size | grows to the largest size that fits; ceiling 256× scale | `text/fit.rs:23` (`CEILING`), `grow()` |
+
+Rebuild: the same order of rules (`app/src/textfit.rs` `fit()`); balloon room is the
+rectangle inscribed in the oval after the 1 em inset; auto size is searched from 6 px to
+min(box height, 160 px) (*estimated bounds*: 256× of a page font is far outside any box).
 
 ## Look (packages/ui/src/styles/*.css, packages/docs/screenshot.png)
 

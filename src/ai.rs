@@ -241,7 +241,6 @@ pub fn translate(
     let body = json!({
         "model": s.model,
         "messages": messages,
-        "temperature": 0.2,
         "stream": false,
     });
     let mut req = ureq::post(&chat_url(&s.endpoint))

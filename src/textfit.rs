@@ -14,7 +14,11 @@ use image::RgbaImage;
 
 use crate::project::{Align, Block, CoverShape};
 
-pub const LINE_HEIGHT: f32 = 1.15;
+/// Line height as a multiple of the font height: koharu-renderer text/style.rs:73
+/// (`line_height.unwrap_or(1.2)`).
+pub const LINE_HEIGHT: f32 = 1.2;
+/// A set size shrinks no smaller than this share of itself: text/fit.rs:66.
+pub const SHRINK_FLOOR: f32 = 0.5;
 pub const MIN_PX: f32 = 6.0;
 pub const MAX_PX: f32 = 160.0;
 
@@ -266,31 +270,76 @@ fn wrap(sh: &Shaper, text: &str, px: f32, max_w: f32) -> (Vec<String>, bool) {
     (lines, split)
 }
 
-/// The size and lines of `text` in a `w`×`h` room: a fixed size wraps as it can; auto
-/// size is the largest whose whole words fit.
-fn fit(sh: &Shaper, text: &str, w: f32, h: f32, size: Option<f32>) -> (f32, Vec<String>) {
-    if let Some(px) = size {
-        return (px, wrap(sh, text, px, w).0);
+/// Margins (x, y) around the text at size `px`. A balloon (oval cover) keeps `inset_em`
+/// letter widths of air from its outline (the original's `Frame::DEFAULT_INSET` = 1 em,
+/// koharu-scene values.rs:296) and uses the rectangle inscribed in the oval; a plain box
+/// keeps a thin margin.
+fn margins(wf: f32, hf: f32, oval: bool, stroke: f32, px: f32, inset_em: f32) -> (f32, f32) {
+    if oval {
+        let inset = px * inset_em;
+        let a = (wf / 2.0 - inset).max(2.0);
+        let b = (hf / 2.0 - inset).max(2.0);
+        let (iw, ih) = (a * std::f32::consts::SQRT_2, b * std::f32::consts::SQRT_2);
+        (((wf - iw) / 2.0).max(1.0) + stroke, ((hf - ih) / 2.0).max(1.0) + stroke)
+    } else {
+        ((wf * 0.05).max(2.0) + stroke, (hf * 0.05).max(2.0) + stroke)
     }
-    let fits = |px: f32| {
-        let (lines, split) = wrap(sh, text, px, w);
-        let total = lines.len() as f32 * sh.height(px) * LINE_HEIGHT;
-        (!split && total <= h, lines)
+}
+
+pub struct Fitted {
+    pub px: f32,
+    pub lines: Vec<String>,
+    pub pad_x: f32,
+    pub pad_y: f32,
+}
+
+/// Fits `text` in a `wf`×`hf` box the way the original's fit.rs does:
+/// - a set size is kept when its whole words fit; otherwise it shrinks, whole words
+///   only, to the largest scale down to half the set size (fit.rs:66, floor 0.5);
+/// - at that floor a balloon's margin narrows to half (fit.rs:89), and only then are
+///   words broken;
+/// - auto size takes the largest size whose whole words fit (grow, up to MAX_PX).
+fn fit(sh: &Shaper, text: &str, wf: f32, hf: f32, oval: bool, stroke: f32, size: Option<f32>) -> Fitted {
+    let attempt = |px: f32, inset_em: f32| {
+        let (pad_x, pad_y) = margins(wf, hf, oval, stroke, px, inset_em);
+        let rw = (wf - 2.0 * pad_x).max(4.0);
+        let rh = (hf - 2.0 * pad_y).max(4.0);
+        let (lines, split) = wrap(sh, text, px, rw);
+        let ok = !split && lines.len() as f32 * sh.height(px) * LINE_HEIGHT <= rh;
+        (ok, Fitted { px, lines, pad_x, pad_y })
     };
-    let (mut lo, mut hi) = (MIN_PX, MAX_PX.min(h.max(MIN_PX)));
-    if !fits(lo).0 {
-        return (lo, wrap(sh, text, lo, w).0);
-    }
-    for _ in 0..14 {
-        let mid = (lo + hi) / 2.0;
-        if fits(mid).0 {
-            lo = mid;
-        } else {
-            hi = mid;
+    let largest = |lo: f32, hi: f32| -> Option<f32> {
+        if !attempt(lo, 1.0).0 {
+            return None;
         }
+        let (mut lo, mut hi) = (lo, hi.max(lo));
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            if attempt(mid, 1.0).0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Some((lo * 10.0).floor() / 10.0)
+    };
+    match size {
+        Some(set) => {
+            let (ok, at_set) = attempt(set, 1.0);
+            if ok {
+                return at_set;
+            }
+            let floor = set * SHRINK_FLOOR;
+            match largest(floor, set) {
+                Some(px) => attempt(px, 1.0).1,
+                None => attempt(floor, 0.5).1,
+            }
+        }
+        None => match largest(MIN_PX, MAX_PX.min(hf.max(MIN_PX))) {
+            Some(px) => attempt(px, 1.0).1,
+            None => attempt(MIN_PX, 0.5).1,
+        },
     }
-    let px = (lo * 10.0).floor() / 10.0;
-    (px, fits(px).1)
 }
 
 fn over(dst: &mut [u8], src: [u8; 4], alpha: f32) {
@@ -346,22 +395,10 @@ pub fn render_block(b: &Block, fonts: &FontStore) -> RgbaImage {
         list.push(c);
     }
     let sh = Shaper { fonts: list };
-    // Text inside an oval needs more room at the sides.
-    let pad_x = if b.cover && b.cover_shape == CoverShape::Oval {
-        wf * 0.12
-    } else {
-        wf * 0.05
-    };
-    let pad_y = if b.cover && b.cover_shape == CoverShape::Oval {
-        hf * 0.10
-    } else {
-        hf * 0.05
-    };
-    let pad_x = pad_x.max(2.0) + b.stroke_width;
-    let pad_y = pad_y.max(2.0) + b.stroke_width;
+    let oval = b.cover && b.cover_shape == CoverShape::Oval;
+    let Fitted { px, lines, pad_x, pad_y } = fit(&sh, &text, wf, hf, oval, b.stroke_width, b.size);
     let room_w = (wf - 2.0 * pad_x).max(4.0);
     let room_h = (hf - 2.0 * pad_y).max(4.0);
-    let (px, lines) = fit(&sh, &text, room_w, room_h, b.size);
     let line_h = sh.height(px) * LINE_HEIGHT;
     let block_h = lines.len() as f32 * line_h;
     let top = pad_y + (room_h - block_h) / 2.0;
@@ -450,5 +487,24 @@ pub fn paste(page: &mut RgbaImage, layer: &RgbaImage, x: f32, y: f32) {
         }
         let dst = page.get_pixel_mut(px as u32, py as u32);
         over(&mut dst.0, p.0, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_size_shrinks_to_half_at_most() {
+        let fonts = FontStore::new("");
+        let sh = Shaper { fonts: vec![&*fonts.default] };
+        let text = "A rather long sentence that cannot fit";
+        // Roomy box: the set size is kept.
+        assert_eq!(fit(&sh, "Hi", 400.0, 200.0, false, 0.0, Some(40.0)).px, 40.0);
+        // Tight box: shrinks, never below half the set size.
+        let f = fit(&sh, text, 120.0, 60.0, false, 0.0, Some(40.0));
+        assert!(f.px >= 20.0 && f.px < 40.0, "px {}", f.px);
+        // Auto size grows to fill a big box.
+        assert!(fit(&sh, "Hi", 400.0, 200.0, false, 0.0, None).px > 60.0);
     }
 }
