@@ -1255,6 +1255,13 @@ impl App {
                                 ui.close_menu();
                             }
                             if ui
+                                .add_enabled(has, egui::Button::new("Export as layered PSD files"))
+                                .clicked()
+                            {
+                                self.start_export(ctx, export::Format::Psd);
+                                ui.close_menu();
+                            }
+                            if ui
                                 .add_enabled(has, egui::Button::new("Show comic folder"))
                                 .clicked()
                             {

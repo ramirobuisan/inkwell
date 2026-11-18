@@ -6,6 +6,7 @@ mod export;
 mod import;
 mod launcher;
 mod paint;
+mod psd;
 mod process;
 mod project;
 mod session;
@@ -36,14 +37,15 @@ fn main() -> eframe::Result<()> {
             }
         } else if a == "--screenshot" {
             screenshot = args.next().map(PathBuf::from);
-        } else if a == "--export-cbz" {
+        } else if a == "--export-cbz" || a == "--export-psd" {
+            let format = if a == "--export-psd" { export::Format::Psd } else { export::Format::Cbz };
             // Export a comic folder without opening the window (for scripts and checks).
             let dir = PathBuf::from(args.next().unwrap_or_default());
             let code = match project::load(&dir) {
                 Ok((p, _)) => {
                     let fonts = textfit::FontStore::new(&settings::Settings::load().default_font);
                     let stop = std::sync::atomic::AtomicBool::new(false);
-                    match export::run(&dir, &p, &fonts, export::Format::Cbz, 4, &stop, |d, t| {
+                    match export::run(&dir, &p, &fonts, format, 4, &stop, |d, t| {
                         eprintln!("page {d}/{t}")
                     }) {
                         Ok(path) => {
