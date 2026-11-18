@@ -782,7 +782,7 @@ impl App {
         if !skipped.is_empty() {
             self.toast(
                 format!(
-                    "Skipped {} (only CBZ, ZIP, folders and PNG/JPEG/WebP pictures are supported).",
+                    "Skipped {} (only CBZ, ZIP, CBR, RAR, PDF, folders and PNG/JPEG/WebP pictures are supported).",
                     skipped.join(", ")
                 ),
                 true,
@@ -1050,7 +1050,7 @@ impl App {
             let files = rfd::FileDialog::new()
                 .add_filter(
                     "Comics and pictures",
-                    &["cbz", "zip", "png", "jpg", "jpeg", "webp"],
+                    &["cbz", "zip", "cbr", "rar", "pdf", "png", "jpg", "jpeg", "webp"],
                 )
                 .pick_files()
                 .unwrap_or_default();
@@ -2877,7 +2877,7 @@ impl App {
                         p.rect_filled(rect, 18.0, if resp.hovered() { rose_soft() } else { surface() });
                         dashed_rect(p, rect.shrink(1.0), Stroke::new(2.0_f32, rose_mid()), 10.0, 7.0);
                         p.text(rect.center() - vec2(0.0, 44.0), Align2::CENTER_CENTER, "📥", FontId::proportional(40.0), rose());
-                        p.text(rect.center() + vec2(0.0, 6.0), Align2::CENTER_CENTER, "Drop CBZ or ZIP comics here", FontId::proportional(20.0), text_c());
+                        p.text(rect.center() + vec2(0.0, 6.0), Align2::CENTER_CENTER, "Drop CBZ, CBR, ZIP, RAR or PDF comics here", FontId::proportional(20.0), text_c());
                         p.text(
                             rect.center() + vec2(0.0, 34.0),
                             Align2::CENTER_CENTER,

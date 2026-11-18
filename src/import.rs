@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::project::{self, natural_cmp, Page, Project};
 
-pub const ARCHIVES: [&str; 2] = ["cbz", "zip"];
+pub const ARCHIVES: [&str; 5] = ["cbz", "zip", "cbr", "rar", "pdf"];
 pub const PICTURES: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 
 /// The files an OS leaves in a folder it archives, which aren't pages.
@@ -214,7 +214,11 @@ fn import_new(
     let written = if folder {
         unpack_folder(source, &pages_dir, progress)
     } else {
-        unpack_zip(source, &pages_dir, progress)
+        match extension(source).as_str() {
+            "rar" | "cbr" => unpack_rar(source, &pages_dir, progress),
+            "pdf" => unpack_pdf(source, &pages_dir, progress),
+            _ => unpack_zip(source, &pages_dir, progress),
+        }
     };
     let written = match written {
         Ok(w) if !w.is_empty() => w,
@@ -314,6 +318,97 @@ fn unpack_zip(
         }
         let display = name.rsplit('/').next().unwrap_or(&name).to_owned();
         out.push((format!("pages/{file}"), display));
+        progress(n + 1, total);
+    }
+    Ok(out)
+}
+
+/// Writes pages given as (member name, bytes) in name order, numbers by value.
+fn write_members(
+    mut members: Vec<(String, Vec<u8>)>,
+    pages_dir: &Path,
+    progress: impl Fn(usize, usize),
+) -> Result<Vec<(String, String)>, String> {
+    members.sort_by(|a, b| natural_cmp(&a.0, &b.0));
+    let total = members.len();
+    let width = digits(total);
+    let mut out = Vec::with_capacity(total);
+    for (n, (name, bytes)) in members.into_iter().enumerate() {
+        let file = format!("{:0width$}.{}", n + 1, extension(Path::new(&name)));
+        let path = pages_dir.join(&file);
+        if fs::metadata(&path).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
+            write_page(&mut bytes.as_slice(), &path)?;
+        }
+        let display = name.rsplit('/').next().unwrap_or(&name).to_owned();
+        out.push((format!("pages/{file}"), display));
+        progress(n + 1, total);
+    }
+    Ok(out)
+}
+
+/// Collects the RAR member being extracted: `extract_to` writes each member whole before
+/// it opens the next (as the original's `LastMember` does).
+struct LastMember(std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>);
+
+impl io::Write for LastMember {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(last) = self.0.borrow_mut().last_mut() {
+            last.1.extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A RAR or CBR archive's pictures.
+fn unpack_rar(source: &Path, pages_dir: &Path, progress: impl Fn(usize, usize)) -> Result<Vec<(String, String)>, String> {
+    let archive = rars::ArchiveReader::read_path(source)
+        .map_err(|e| format!("{} isn't an image or an archive: {e}", source.display()))?;
+    let members = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    archive
+        .extract_to(None, |entry| {
+            let name = entry.name_lossy();
+            if entry.is_directory || !is_picture_name(&name) || is_metadata(&name) {
+                return Ok(Box::new(io::sink()));
+            }
+            members.borrow_mut().push((name.to_string(), Vec::new()));
+            Ok(Box::new(LastMember(std::rc::Rc::clone(&members))))
+        })
+        .map_err(|e| format!("Couldn't unpack {}: {e}", source.display()))?;
+    let members = members.take();
+    write_members(members, pages_dir, progress)
+}
+
+/// PDF points to pixels at 300 DPI, as the original renders PDFs (import.rs `PDF_SCALE`).
+const PDF_SCALE: f32 = 300.0 / 72.0;
+
+/// A PDF's pages, each rendered at 300 DPI on white, one at a time.
+fn unpack_pdf(source: &Path, pages_dir: &Path, progress: impl Fn(usize, usize)) -> Result<Vec<(String, String)>, String> {
+    use hayro::{hayro_interpret::InterpreterSettings, hayro_syntax::Pdf, render, vello_cpu::color::palette::css::WHITE, PixmapSettings, RenderCache, RenderSettings};
+    let bytes = fs::read(source).map_err(|e| format!("Can't open {}: {e}", source.display()))?;
+    let pdf = Pdf::new(bytes).map_err(|e| format!("{} isn't a readable PDF: {e:?}", source.display()))?;
+    let pages = pdf.pages();
+    let total = pages.len();
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+    let (interpreter, settings, cache) = (InterpreterSettings::default(), RenderSettings::default(), RenderCache::new());
+    let pixmap = PixmapSettings { x_scale: PDF_SCALE, y_scale: PDF_SCALE, bg_color: WHITE };
+    let width = digits(total);
+    let mut out = Vec::with_capacity(total);
+    for (n, page) in pages.iter().enumerate() {
+        let file = format!("{:0width$}.png", n + 1);
+        let path = pages_dir.join(&file);
+        if !path.exists() {
+            let png = render(page, &cache, &interpreter, &settings, &pixmap)
+                .into_png()
+                .map_err(|e| format!("Couldn't draw page {} of {}: {e:?}", n + 1, source.display()))?;
+            write_page(&mut png.as_slice(), &path)?;
+        }
+        out.push((format!("pages/{file}"), format!("Page {}", n + 1)));
         progress(n + 1, total);
     }
     Ok(out)
