@@ -45,6 +45,9 @@ fn render_page(dir: &Path, page: &project::Page, fonts: &FontStore) -> Result<Ve
     let mut img = image::open(dir.join(&page.file))
         .map_err(|e| format!("{}: {e}", page.file))?
         .to_rgba8();
+    if let Some(layer) = page.paint.as_deref().and_then(|rel| crate::paint::load(dir, rel)) {
+        textfit::paste(&mut img, &layer, 0.0, 0.0);
+    }
     for b in page.blocks.iter().filter(|b| b.visible) {
         let layer = textfit::render_block(b, fonts);
         textfit::paste(&mut img, &layer, b.x, b.y);

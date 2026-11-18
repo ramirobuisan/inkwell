@@ -5,6 +5,7 @@ mod app;
 mod export;
 mod import;
 mod launcher;
+mod paint;
 mod process;
 mod project;
 mod session;

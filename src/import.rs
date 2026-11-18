@@ -252,6 +252,7 @@ fn page_for(dest: &Path, file: String, name: String) -> Page {
         width,
         height,
         blocks: Vec::new(),
+        paint: None,
     }
 }
 

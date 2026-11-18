@@ -96,6 +96,9 @@ enum Tool {
     Select,
     Text,
     Pan,
+    Brush,
+    Eraser,
+    Picker,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -106,6 +109,7 @@ enum Tab {
 }
 
 enum Drag {
+    Paint { last: Pos2, before: image::RgbaImage, bounds: Option<crate::paint::Bounds> },
     Create { start: Pos2 },
     Move { id: u64, grab: Vec2 },
     Resize { id: u64 },
@@ -151,6 +155,12 @@ struct Open {
     drag: Option<Drag>,
     focus_translation: bool,
     scroll_list: bool,
+    paints: HashMap<usize, image::RgbaImage>,
+    paint_tex: HashMap<usize, egui::TextureHandle>,
+    paint_dirty: HashSet<usize>,
+    undo_paint: Vec<Option<crate::paint::Patch>>,
+    redo_paint: Vec<Option<crate::paint::Patch>>,
+    page_pixels: Option<(usize, image::RgbaImage)>,
 }
 
 impl Open {
@@ -180,6 +190,12 @@ impl Open {
             drag: None,
             focus_translation: false,
             scroll_list: true,
+            paints: HashMap::new(),
+            paint_tex: HashMap::new(),
+            paint_dirty: HashSet::new(),
+            undo_paint: Vec::new(),
+            redo_paint: Vec::new(),
+            page_pixels: None,
         }
     }
 
@@ -211,11 +227,44 @@ impl Open {
         self.coalesce = key;
         if let Some(p) = self.data.pages.get(i) {
             self.undo.push((i, p.blocks.clone()));
-            if self.undo.len() > UNDO_STEPS {
-                self.undo.remove(0);
-            }
-            self.redo.clear();
+            self.undo_paint.push(None);
+            self.trim_history();
         }
+    }
+
+    fn trim_history(&mut self) {
+        while self.undo.len() > UNDO_STEPS {
+            self.undo.remove(0);
+            self.undo_paint.remove(0);
+        }
+        self.redo.clear();
+        self.redo_paint.clear();
+    }
+
+    /// The cleanup layer of page `i`, loaded from disk or made empty at the page's size.
+    fn paint_layer(&mut self, i: usize) -> Option<&mut image::RgbaImage> {
+        if !self.paints.contains_key(&i) {
+            let page = self.data.pages.get(i)?;
+            let img = page
+                .paint
+                .as_deref()
+                .and_then(|rel| crate::paint::load(&self.dir, rel))
+                .filter(|img| img.width() == page.width && img.height() == page.height)
+                .or_else(|| (page.width > 0).then(|| image::RgbaImage::new(page.width, page.height)))?;
+            self.paints.insert(i, img);
+        }
+        self.paints.get_mut(&i)
+    }
+
+    /// One undo step for a brush or eraser stroke on page `i`.
+    fn push_paint(&mut self, i: usize, patch: crate::paint::Patch) {
+        let blocks = self.data.pages[i].blocks.clone();
+        self.undo.push((i, blocks));
+        self.undo_paint.push(Some(patch));
+        self.trim_history();
+        self.coalesce = None;
+        self.paint_dirty.insert(i);
+        self.changed();
     }
 
     fn snapshot(&mut self, key: Option<(u64, u8)>) {
@@ -230,6 +279,22 @@ impl Open {
     }
 
     fn step(&mut self, back: bool) {
+        let painted = if back { self.undo_paint.pop() } else { self.redo_paint.pop() }.flatten();
+        let swapped = match painted {
+            Some(patch) => {
+                let i = if back { self.undo.last() } else { self.redo.last() }.map(|s| s.0);
+                match i.and_then(|i| self.paint_layer(i).map(|img| crate::paint::swap(img, &patch)).map(|old| (i, old))) {
+                    Some((i, old)) => {
+                        self.paint_dirty.insert(i);
+                        self.paint_tex.remove(&i);
+                        Some(old)
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        if back { self.redo_paint.push(swapped) } else { self.undo_paint.push(swapped) }
         let (from, to) = if back {
             (&mut self.undo, &mut self.redo)
         } else {
@@ -253,6 +318,18 @@ impl Open {
     fn save(&mut self) {
         if !self.dirty {
             return;
+        }
+        for i in std::mem::take(&mut self.paint_dirty) {
+            let Some(img) = self.paints.get(&i) else { continue };
+            let Some(page) = self.data.pages.get_mut(i) else { continue };
+            let rel = page.paint.clone().unwrap_or_else(|| crate::paint::file_for(&page.file));
+            match crate::paint::save(&self.dir, &rel, img) {
+                Ok(()) => page.paint = Some(rel),
+                Err(e) => {
+                    self.paint_dirty.insert(i);
+                    self.save_error = Some(e);
+                }
+            }
         }
         let json = project::to_json(&self.data);
         match project::save_json(&self.dir, &json) {
@@ -303,6 +380,8 @@ pub struct App {
     folder_picker: Option<Receiver<PathBuf>>,
     open_after_import: bool,
     applied_dark: Option<bool>,
+    brush_size: f32,
+    brush_color: [u8; 4],
     server_models: Option<Result<Vec<String>, String>>,
     models_rx: Option<Receiver<Result<Vec<String>, String>>>,
     run_problem: Option<String>,
@@ -537,6 +616,8 @@ impl App {
             folder_picker: None,
             open_after_import: false,
             applied_dark: None,
+            brush_size: 24.0,
+            brush_color: [255, 255, 255, 255],
             server_models: None,
             models_rx: None,
             run_problem: None,
@@ -1083,6 +1164,22 @@ impl App {
         }
         if h {
             self.tool = Tool::Pan;
+        }
+        let (kb, ke, ki) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::B),
+                i.consume_key(Modifiers::NONE, Key::E),
+                i.consume_key(Modifiers::NONE, Key::I),
+            )
+        });
+        if kb {
+            self.tool = Tool::Brush;
+        }
+        if ke {
+            self.tool = Tool::Eraser;
+        }
+        if ki {
+            self.tool = Tool::Picker;
         }
         let cur = self.open.as_ref().map(|o| o.data.current).unwrap_or(0);
         if next {
@@ -2128,6 +2225,18 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Picker) {
+                        ui.label(RichText::new(match self.tool {
+                            Tool::Eraser => "⌫ Eraser",
+                            Tool::Picker => "💧 Click the page to pick a colour",
+                            _ => "🖌 Cleanup brush",
+                        }).strong());
+                        ui.add(egui::Slider::new(&mut self.brush_size, 2.0..=200.0).logarithmic(true).suffix(" px").text("Size"));
+                        if self.tool != Tool::Eraser {
+                            ui.color_edit_button_srgba_unmultiplied(&mut self.brush_color);
+                        }
+                        ui.separator();
+                    }
                     if let Some(r) = &self.running {
                         let frac = if r.total == 0 {
                             0.0
@@ -2270,6 +2379,10 @@ impl App {
         let fonts = self.fonts.clone();
         let tool = self.tool;
         let show_numbers = self.tab == Tab::Story;
+        let brush_size = self.brush_size;
+        let brush_color = self.brush_color;
+        let mut picked: Option<[u8; 4]> = None;
+        let mut paint_note: Option<&str> = None;
         let cap = self.settings.texture_cap;
         let default_font = self.settings.default_font.clone();
         let mut new_tool = None;
@@ -2370,7 +2483,24 @@ impl App {
                     }
                 }
 
-                // Text boxes: the same pixels export will paste.
+                // Cleanup layer, over the artwork and under the text.
+            if o.paints.contains_key(&cur) || o.data.pages[cur].paint.is_some() {
+                if !o.paint_tex.contains_key(&cur) {
+                    if let Some(img) = o.paint_layer(cur) {
+                        let ci = egui::ColorImage::from_rgba_unmultiplied(
+                            [img.width() as usize, img.height() as usize],
+                            img.as_raw(),
+                        );
+                        let t = ctx.load_texture(format!("paint-{}-{cur}", o.gen), ci, PAGE_TEX);
+                        o.paint_tex.insert(cur, t);
+                    }
+                }
+                if let Some(t) = o.paint_tex.get(&cur) {
+                    painter.image(t.id(), page_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+            }
+
+            // Text boxes: the same pixels export will paste.
                 let blocks: Vec<Block> = o.data.pages[cur].blocks.clone();
                 for b in &blocks {
                     let r = Rect::from_min_max(
@@ -2454,7 +2584,7 @@ impl App {
                     let icon = match (tool, &o.drag) {
                         (_, Some(Drag::Pan)) => egui::CursorIcon::Grabbing,
                         (Tool::Pan, _) => egui::CursorIcon::Grab,
-                        (Tool::Text, _) => egui::CursorIcon::Crosshair,
+                        (Tool::Text | Tool::Brush | Tool::Eraser | Tool::Picker, _) => egui::CursorIcon::Crosshair,
                         _ if on_handle(s) => egui::CursorIcon::ResizeNwSe,
                         _ if hit(to_page(s)).is_some() => egui::CursorIcon::Move,
                         _ => egui::CursorIcon::Default,
@@ -2466,7 +2596,14 @@ impl App {
                         let p = to_page(s);
                         let other =
                             ui.input(|i| i.pointer.middle_down() || i.pointer.secondary_down());
-                        let drag = if other || tool == Tool::Pan {
+                        let painting = matches!(tool, Tool::Brush | Tool::Eraser);
+                        let before = if painting && !other { o.paint_layer(cur).map(|img| img.clone()) } else { None };
+                        if painting && !other && before.is_none() {
+                            paint_note = Some("This page's size isn't known yet, so it can't be painted.");
+                        }
+                        let drag = if let Some(before) = before {
+                            Drag::Paint { last: p, before, bounds: None }
+                        } else if other || tool == Tool::Pan || painting || tool == Tool::Picker {
                             Drag::Pan
                         } else if tool == Tool::Text {
                             Drag::Create { start: p }
@@ -2492,7 +2629,28 @@ impl App {
                 if resp.dragged() {
                     if let Some(s) = pointer {
                         let p = to_page(s);
+                        if let Some(Drag::Paint { last, .. }) = &mut o.drag {
+                            let (from, to) = ((last.x, last.y), (p.x, p.y));
+                            *last = p;
+                            let erase = tool == Tool::Eraser;
+                            let mut touched = None;
+                            if let Some(img) = o.paints.get_mut(&cur) {
+                                touched = crate::paint::stroke(img, from, to, brush_size / 2.0, brush_color, erase);
+                                if let (Some(b), Some(t)) = (touched, o.paint_tex.get_mut(&cur)) {
+                                    let part = crate::paint::crop(img, b);
+                                    let ci = egui::ColorImage::from_rgba_unmultiplied(
+                                        [part.width() as usize, part.height() as usize],
+                                        part.as_raw(),
+                                    );
+                                    t.set_partial([b[0] as usize, b[1] as usize], ci, PAGE_TEX);
+                                }
+                            }
+                            if let (Some(t), Some(Drag::Paint { bounds, .. })) = (touched, &mut o.drag) {
+                                *bounds = Some(crate::paint::union(*bounds, t));
+                            }
+                        }
                         match &o.drag {
+                            Some(Drag::Paint { .. }) => {}
                             Some(Drag::Pan) => o.pan += resp.drag_delta(),
                             Some(Drag::Move { id, grab }) => {
                                 let (id, grab) = (*id, *grab);
@@ -2529,6 +2687,10 @@ impl App {
                     }
                 }
                 if resp.drag_stopped() {
+                    if let Some(Drag::Paint { before, bounds: Some(b), .. }) = o.drag.take() {
+                        let patch = crate::paint::Patch { x: b[0], y: b[1], img: crate::paint::crop(&before, b) };
+                        o.push_paint(cur, patch);
+                    }
                     if let (Some(Drag::Create { start }), Some(s)) = (&o.drag, pointer) {
                         let r = Rect::from_two_pos(*start, to_page(s));
                         if r.width() >= 8.0 && r.height() >= 8.0 {
@@ -2558,8 +2720,43 @@ impl App {
                 }
                 if resp.clicked() {
                     if let Some(s) = pointer {
-                        o.selected = hit(to_page(s));
-                        o.coalesce = None;
+                        let p = to_page(s);
+                        match tool {
+                            Tool::Brush | Tool::Eraser => {
+                                let erase = tool == Tool::Eraser;
+                                let before = o.paint_layer(cur).map(|img| img.clone());
+                                let touched = o
+                                    .paints
+                                    .get_mut(&cur)
+                                    .and_then(|img| crate::paint::stroke(img, (p.x, p.y), (p.x, p.y), brush_size / 2.0, brush_color, erase));
+                                if let (Some(before), Some(b)) = (before, touched) {
+                                    o.paint_tex.remove(&cur);
+                                    let patch = crate::paint::Patch { x: b[0], y: b[1], img: crate::paint::crop(&before, b) };
+                                    o.push_paint(cur, patch);
+                                }
+                            }
+                            Tool::Picker => {
+                                if o.page_pixels.as_ref().map(|(i, _)| *i) != Some(cur) {
+                                    let path = o.dir.join(&o.data.pages[cur].file);
+                                    o.page_pixels = image::open(path).ok().map(|img| (cur, img.to_rgba8()));
+                                }
+                                let (x, y) = (p.x.max(0.0) as u32, p.y.max(0.0) as u32);
+                                let painted = o.paints.get(&cur).filter(|i| x < i.width() && y < i.height()).map(|i| i.get_pixel(x, y).0);
+                                let base = o.page_pixels.as_ref().filter(|(_, i)| x < i.width() && y < i.height()).map(|(_, i)| i.get_pixel(x, y).0);
+                                picked = match (painted, base) {
+                                    (Some(c), _) if c[3] > 200 => Some(c),
+                                    (_, Some(mut c)) => {
+                                        c[3] = 255;
+                                        Some(c)
+                                    }
+                                    _ => None,
+                                };
+                            }
+                            _ => {
+                                o.selected = hit(p);
+                                o.coalesce = None;
+                            }
+                        }
                     }
                 }
                 if resp.double_clicked() && o.selected.is_some() {
@@ -2589,6 +2786,9 @@ impl App {
                                         (Tool::Select, "⬉", "Select and move boxes (V)"),
                                         (Tool::Text, "T", "Draw a text box (T)"),
                                         (Tool::Pan, "✋", "Move the page (H)"),
+                                        (Tool::Brush, "🖌", "Cleanup brush: paint over the original lettering (B)"),
+                                        (Tool::Eraser, "⌫", "Eraser: remove cleanup paint (E)"),
+                                        (Tool::Picker, "💧", "Pick a brush colour from the page (I)"),
                                     ] {
                                         let on = tool == t;
                                         let b = egui::Button::new(
@@ -2610,6 +2810,13 @@ impl App {
                             });
                     });
             });
+        if let Some(c) = picked {
+            self.brush_color = c;
+            self.tool = Tool::Brush;
+        }
+        if let Some(n) = paint_note {
+            self.toast(n, true);
+        }
         if let Some(t) = new_tool {
             self.tool = t;
         }
@@ -2939,7 +3146,13 @@ impl App {
                     } else {
                         after
                     };
-                    labels.push(format!("{}  ·  page {}", describe_step(before, &after), page + 1));
+                    let painted = if k < done {
+                        o.undo_paint.get(k).is_some_and(Option::is_some)
+                    } else {
+                        o.redo_paint.iter().rev().nth(k - done).is_some_and(Option::is_some)
+                    };
+                    let what = if painted { "Cleanup brush".to_owned() } else { describe_step(before, &after) };
+                    labels.push(format!("{what}  ·  page {}", page + 1));
                 }
                 egui::Window::new("History")
                     .open(&mut openw)

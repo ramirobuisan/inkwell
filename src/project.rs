@@ -127,6 +127,8 @@ pub struct Page {
     pub width: u32,
     pub height: u32,
     pub blocks: Vec<Block>,
+    /// The cleanup layer painted with the brush, relative to the comic's folder.
+    pub paint: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
