@@ -12,7 +12,7 @@ use std::{
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use image::RgbaImage;
 
-use crate::project::{Align, Block, CoverShape};
+use crate::project::{Align, Block, CoverShape, Direction};
 
 /// Line height as a multiple of the font height: koharu-renderer text/style.rs:73
 /// (`line_height.unwrap_or(1.2)`).
@@ -32,6 +32,8 @@ pub struct FontStore {
     pub default_path: String,
     cjk: Option<Arc<FontVec>>,
     pub cjk_path: Option<PathBuf>,
+    /// Fallbacks for other scripts (Arabic with its joined forms, Hebrew).
+    extra: Vec<Arc<FontVec>>,
     /// (display name, file path) of every font on the system.
     pub list: Arc<Vec<(String, String)>>,
 }
@@ -130,12 +132,26 @@ impl FontStore {
             .as_ref()
             .and_then(|p| load_font(&p.to_string_lossy()))
             .map(Arc::new);
+        let extra = [
+            "NotoSansArabic-Bold",
+            "NotoSansArabic-Regular",
+            "NotoNaskhArabic-Regular",
+            "NotoSansHebrew-Bold",
+            "NotoSansHebrew-Regular",
+            "DejaVuSans",
+        ]
+        .iter()
+        .filter_map(|s| find(s))
+        .filter_map(|p| load_font(&p))
+        .map(Arc::new)
+        .collect();
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
             default: Arc::new(default),
             default_path,
             cjk,
             cjk_path,
+            extra,
             list: Arc::new(list),
         }
     }
@@ -345,6 +361,181 @@ fn fit(sh: &Shaper, text: &str, wf: f32, hf: f32, oval: bool, stroke: f32, size:
     }
 }
 
+fn is_arabic(c: char) -> bool {
+    matches!(c as u32, 0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF)
+}
+
+/// Arabic letters in their joined (presentation) forms, since glyphs are drawn one by one.
+fn shape_arabic(text: &str) -> String {
+    if !text.chars().any(is_arabic) {
+        return text.to_owned();
+    }
+    text.split('\n').map(ar_reshaper::reshape_line).collect::<Vec<_>>().join("\n")
+}
+
+/// A line in the order its characters show: right-to-left runs reversed by the Unicode
+/// bidirectional algorithm, as the original orders runs by their bidi levels
+/// (koharu-renderer text/arrange.rs).
+fn visual_order(line: &str) -> String {
+    if !line.chars().any(|c| matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)) {
+        return line.to_owned();
+    }
+    let info = unicode_bidi::BidiInfo::new(line, None);
+    info.paragraphs
+        .iter()
+        .map(|para| info.reorder_line(para, para.range.clone()).into_owned())
+        .collect()
+}
+
+fn mostly_cjk(text: &str) -> bool {
+    let (mut cjk, mut all) = (0, 0);
+    for c in text.chars().filter(|c| c.is_alphanumeric()) {
+        all += 1;
+        if is_cjk(c) {
+            cjk += 1;
+        }
+    }
+    all > 0 && cjk * 2 > all
+}
+
+/// The upright vertical forms of punctuation that lies on its side in horizontal text.
+fn vertical_form(c: char) -> char {
+    match c {
+        'ー' | '－' | '—' | '―' | '─' => '︱',
+        '…' | '‥' => '︙',
+        '、' => '︑',
+        '。' => '︒',
+        '，' => '︐',
+        '（' | '(' => '︵',
+        '）' | ')' => '︶',
+        '「' => '﹁',
+        '」' => '﹂',
+        '『' => '﹃',
+        '』' => '﹄',
+        '【' => '︻',
+        '】' => '︼',
+        '〜' | '～' => '︴',
+        other => other,
+    }
+}
+
+/// Vertical lines (columns) of `text`, top to bottom, the first column on the right.
+fn columns(sh: &Shaper, text: &str, px: f32, room_h: f32) -> Vec<String> {
+    let em = em(sh, px);
+    let per = ((room_h / em).floor() as usize).max(1);
+    let mut cols = Vec::new();
+    for para in text.split('\n') {
+        let chars: Vec<char> = para.chars().filter(|c| !c.is_whitespace()).map(vertical_form).collect();
+        if chars.is_empty() {
+            cols.push(String::new());
+            continue;
+        }
+        let start = cols.len();
+        for chunk in chars.chunks(per) {
+            cols.push(chunk.iter().collect::<String>());
+        }
+        // Closing marks never start a column (kinsoku): they hang at the end of the one
+        // before, as Japanese typesetting does.
+        for k in start + 1..cols.len() {
+            while let Some(c) = cols[k].chars().next().filter(|c| "︒︑︐︶﹂﹄︼︱︙！？!?ぁぃぅぇぉっゃゅょァィゥェォッャュョ".contains(*c)) {
+                cols[k].remove(0);
+                cols[k - 1].push(c);
+            }
+        }
+        cols.retain(|c| !c.is_empty());
+    }
+    cols
+}
+
+/// One character cell of vertical text.
+fn em(sh: &Shaper, px: f32) -> f32 {
+    let a = sh.advance('国', px);
+    if a > 0.0 { a } else { px * 0.8 }
+}
+
+/// Fits vertical text with the same rules as horizontal text (set size shrinks to half,
+/// then the balloon margin halves; auto size grows), columns `LINE_HEIGHT` em apart.
+fn fit_vertical(sh: &Shaper, text: &str, wf: f32, hf: f32, oval: bool, stroke: f32, size: Option<f32>) -> Fitted {
+    let attempt = |px: f32, inset_em: f32| {
+        let (pad_x, pad_y) = margins(wf, hf, oval, stroke, px, inset_em);
+        let rw = (wf - 2.0 * pad_x).max(4.0);
+        let rh = (hf - 2.0 * pad_y).max(4.0);
+        let cols = columns(sh, text, px, rh);
+        let e = em(sh, px);
+        let ok = e <= rh && cols.len() as f32 * e * LINE_HEIGHT <= rw;
+        (ok, Fitted { px, lines: cols, pad_x, pad_y })
+    };
+    let largest = |lo: f32, hi: f32| -> Option<f32> {
+        if !attempt(lo, 1.0).0 {
+            return None;
+        }
+        let (mut lo, mut hi) = (lo, hi.max(lo));
+        for _ in 0..HALVINGS {
+            let mid = (lo + hi) / 2.0;
+            if attempt(mid, 1.0).0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Some((lo * 10.0).floor() / 10.0)
+    };
+    match size {
+        Some(set) => {
+            let (ok, at_set) = attempt(set, 1.0);
+            if ok {
+                return at_set;
+            }
+            let floor = set * SHRINK_FLOOR;
+            match largest(floor, set) {
+                Some(px) => attempt(px, 1.0).1,
+                None => attempt(floor, 0.5).1,
+            }
+        }
+        None => match largest(MIN_PX, MAX_PX.min(wf.max(MIN_PX))) {
+            Some(px) => attempt(px, 1.0).1,
+            None => attempt(MIN_PX, 0.5).1,
+        },
+    }
+}
+
+fn draw_glyph(sh: &Shaper, c: char, px: f32, x: f32, base: f32, mask: &mut [f32], w: u32, h: u32) -> f32 {
+    let f = sh.fonts[sh.pick(c)];
+    let id = f.glyph_id(c);
+    let glyph = id.with_scale_and_position(PxScale::from(px), ab_glyph::point(x, base));
+    if let Some(o) = f.outline_glyph(glyph) {
+        let bb = o.px_bounds();
+        o.draw(|gx, gy, cov| {
+            let px_ = bb.min.x as i32 + gx as i32;
+            let py_ = bb.min.y as i32 + gy as i32;
+            if px_ >= 0 && py_ >= 0 && (px_ as u32) < w && (py_ as u32) < h {
+                let m = &mut mask[(py_ as u32 * w + px_ as u32) as usize];
+                *m = m.max(cov);
+            }
+        });
+    }
+    f.as_scaled(PxScale::from(px)).h_advance(id)
+}
+
+/// Columns right to left, centred as a block; each character upright in its cell.
+fn draw_vertical(sh: &Shaper, f: &Fitted, wf: f32, hf: f32, mask: &mut [f32], w: u32, h: u32) {
+    let e = em(sh, f.px);
+    let col_w = e * LINE_HEIGHT;
+    let room_w = (wf - 2.0 * f.pad_x).max(4.0);
+    let room_h = (hf - 2.0 * f.pad_y).max(4.0);
+    let longest = f.lines.iter().map(|c| c.chars().count()).max().unwrap_or(0) as f32 * e;
+    let right = f.pad_x + (room_w + f.lines.len() as f32 * col_w) / 2.0;
+    let top = f.pad_y + (room_h - longest) / 2.0;
+    for (k, col) in f.lines.iter().enumerate() {
+        let cx = right - (k as f32 + 0.5) * col_w;
+        for (j, c) in col.chars().enumerate() {
+            let adv = sh.advance(c, f.px);
+            let base = top + j as f32 * e + e * 0.88;
+            draw_glyph(sh, c, f.px, cx - adv / 2.0, base, mask, w, h);
+        }
+    }
+}
+
 fn over(dst: &mut [u8], src: [u8; 4], alpha: f32) {
     let a = (src[3] as f32 / 255.0) * alpha.clamp(0.0, 1.0);
     if a <= 0.0 {
@@ -397,8 +588,21 @@ pub fn render_block(b: &Block, fonts: &FontStore) -> RgbaImage {
     if let Some(c) = fonts.cjk.as_deref() {
         list.push(c);
     }
+    list.extend(fonts.extra.iter().map(|f| &**f));
     let sh = Shaper { fonts: list };
     let oval = b.cover && b.cover_shape == CoverShape::Oval;
+    // Arabic letters take their joined forms before measuring.
+    let text = shape_arabic(&text);
+    let vertical = match b.direction {
+        Direction::Vertical => true,
+        Direction::Horizontal => false,
+        Direction::Auto => mostly_cjk(&text) && hf > wf * 1.2,
+    };
+    let mut mask = vec![0f32; (w * h) as usize];
+    if vertical {
+        let f = fit_vertical(&sh, &text, wf, hf, oval, b.stroke_width, b.size);
+        draw_vertical(&sh, &f, wf, hf, &mut mask, w, h);
+    } else {
     let Fitted { px, lines, pad_x, pad_y } = fit(&sh, &text, wf, hf, oval, b.stroke_width, b.size);
     let room_w = (wf - 2.0 * pad_x).max(4.0);
     let room_h = (hf - 2.0 * pad_y).max(4.0);
@@ -406,8 +610,9 @@ pub fn render_block(b: &Block, fonts: &FontStore) -> RgbaImage {
     let block_h = lines.len() as f32 * line_h;
     let top = pad_y + (room_h - block_h) / 2.0;
 
-    let mut mask = vec![0f32; (w * h) as usize];
     for (i, line) in lines.iter().enumerate() {
+        // Right-to-left runs (Arabic, Hebrew) shown in reading order.
+        let line = &visual_order(line);
         let lw = sh.width(line, px);
         let x0 = match b.align {
             Align::Left => pad_x,
@@ -433,6 +638,7 @@ pub fn render_block(b: &Block, fonts: &FontStore) -> RgbaImage {
             }
             x += f.as_scaled(PxScale::from(px)).h_advance(id);
         }
+    }
     }
 
     if b.stroke_width > 0.0 {
@@ -496,6 +702,23 @@ pub fn paste(page: &mut RgbaImage, layer: &RgbaImage, x: f32, y: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertical_and_right_to_left() {
+        assert!(mostly_cjk("テストです"));
+        assert!(!mostly_cjk("Hello"));
+        assert_eq!(vertical_form('ー'), '︱');
+        assert_eq!(visual_order("abc"), "abc");
+        // Hebrew shows right to left: the first letter ends up last.
+        let v = visual_order("\u{5D0}\u{5D1}\u{5D2}");
+        assert_eq!(v.chars().last(), Some('\u{5D0}'));
+        // Arabic letters take joined forms.
+        assert_ne!(shape_arabic("\u{0633}\u{0644}\u{0627}\u{0645}"), "\u{0633}\u{0644}\u{0627}\u{0645}");
+        let fonts = FontStore::new("");
+        let sh = Shaper { fonts: vec![&*fonts.default] };
+        let cols = columns(&sh, "あいうえおかきくけこ", 20.0, 60.0);
+        assert!(cols.len() >= 3, "{cols:?}");
+    }
 
     #[test]
     fn set_size_shrinks_to_half_at_most() {

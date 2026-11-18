@@ -12,6 +12,8 @@ ab_glyph = "0.2"
 # The same readers the original uses for RAR/CBR and PDF (koharu Cargo.toml).
 rars = "0.12.2"
 hayro = "0.8.0"
+unicode-bidi = "0.3"
+ar-reshaper = "1.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2", features = ["json"] }

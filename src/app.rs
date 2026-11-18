@@ -1715,6 +1715,20 @@ impl App {
                             ui.checkbox(&mut b.uppercase, "CAPS");
                         });
                     });
+                    caps(ui, "DIRECTION");
+                    ui.horizontal(|ui| {
+                        for (d, label) in [
+                            (crate::project::Direction::Auto, "Auto"),
+                            (crate::project::Direction::Horizontal, "↔ Across"),
+                            (crate::project::Direction::Vertical, "↕ Down"),
+                        ] {
+                            let on = b.direction == d;
+                            let btn = egui::Button::new(label).fill(if on { rose_mid() } else { chip() });
+                            if ui.add(btn).on_hover_text("Auto: down for Japanese/Chinese text in a tall box").clicked() {
+                                b.direction = d;
+                            }
+                        }
+                    });
                     caps(ui, "ALIGNMENT");
                     ui.horizontal(|ui| {
                         for (a, label) in [

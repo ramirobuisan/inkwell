@@ -24,6 +24,16 @@ pub enum Align {
     Right,
 }
 
+/// Which way the lines run, as the original's Direction (Horizontal / Vertical, with
+/// Auto in its menu): Auto is vertical for CJK text in a tall box.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub enum Direction {
+    #[default]
+    Auto,
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
 pub enum CoverShape {
     #[default]
@@ -50,6 +60,7 @@ pub struct Block {
     pub stroke: [u8; 4],
     pub stroke_width: f32,
     pub align: Align,
+    pub direction: Direction,
     pub uppercase: bool,
     /// Paint over the original lettering before drawing the translation.
     pub cover: bool,
@@ -74,6 +85,7 @@ impl Default for Block {
             stroke: [255, 255, 255, 255],
             stroke_width: 0.0,
             align: Align::Center,
+            direction: Direction::Auto,
             uppercase: false,
             cover: true,
             cover_shape: CoverShape::Oval,
@@ -96,6 +108,7 @@ impl Block {
         self.stroke.hash(&mut h);
         self.stroke_width.to_bits().hash(&mut h);
         (self.align as u8).hash(&mut h);
+        (self.direction as u8).hash(&mut h);
         self.uppercase.hash(&mut h);
         self.cover.hash(&mut h);
         (self.cover_shape as u8).hash(&mut h);
